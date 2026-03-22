@@ -1,0 +1,7 @@
+results/
+test_data/
+*.cuts.json
+*.mof.json
+*.log
+.DS_Store
+*.pdf

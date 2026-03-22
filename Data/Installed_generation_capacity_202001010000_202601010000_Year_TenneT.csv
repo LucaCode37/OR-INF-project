@@ -1,0 +1,7 @@
+﻿Start date;End date;Biomass [MW] Original resolutions;Hydropower [MW] Original resolutions;Wind offshore [MW] Original resolutions;Wind onshore [MW] Original resolutions;Photovoltaics [MW] Original resolutions;Other renewable [MW] Original resolutions;Nuclear [MW] Original resolutions;Lignite [MW] Original resolutions;Hard coal [MW] Original resolutions;Fossil gas [MW] Original resolutions;Hydro pumped storage [MW] Original resolutions;Other conventional [MW] Original resolutions
+Jan 1, 2020;Jan 1, 2021;3,490.00;2,552.00;6,436.00;22,540.00;17,902.00;93.00;4,180.00;390.00;6,191.00;9,736.00;1,675.00;2,657.00
+Jan 1, 2021;Jan 1, 2022;3,851.00;2,580.00;6,694.00;22,800.00;19,842.00;89.00;4,180.00;390.00;6,191.00;9,523.00;1,675.00;2,718.00
+Jan 1, 2022;Jan 1, 2023;3,909.00;2,613.00;6,694.00;22,976.00;21,816.00;89.00;1,410.00;38.00;4,991.00;8,773.00;1,675.00;2,692.00
+Jan 1, 2023;Jan 1, 2024;3,921.00;2,619.00;7,036.00;23,464.00;24,404.00;90.00;1,410.00;38.00;5,001.00;9,681.00;1,675.00;2,754.00
+Jan 1, 2024;Jan 1, 2025;3,945.00;2,600.00;7,106.00;25,235.00;29,006.00;86.00;0.00;56.00;4,865.00;11,248.00;1,657.00;2,749.00
+Jan 1, 2025;Jan 1, 2026;3,998.00;2,412.00;7,387.00;26,945.00;33,673.00;102.00;-;37.00;2,560.00;11,535.00;1,647.00;4,521.00
