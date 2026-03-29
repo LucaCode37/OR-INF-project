@@ -471,6 +471,8 @@ function create_deterministic_cost_minimization_results_visualization()
         "Generation - Photovoltaics"     => "#ffeb3b",
     )
 
+    zone_colors = [colorant"#1565c0", colorant"#f9a825", colorant"#2e7d32", colorant"#8e24aa"]
+
     Gs = ["Wind offshore", "Wind onshore", "Photovoltaics", "Loss of Load"]
     Ss = ["Battery", "Hydrogen"]
     Zs = ["50Hertz", "Amprion", "TenneT", "TransnetBW"]
@@ -479,21 +481,39 @@ function create_deterministic_cost_minimization_results_visualization()
     transport_options = [true, false]
     transport_labels = ["Local Pricing", "Perfect Competition"]
 
-    fig = Figure(size = (1400, 1000))
+    fig = Figure(size = (1600, 1200))
 
-    dd_year = Menu(fig[1, 1], options = collect(years))
-    dd_transport = Menu(fig[1, 2], options = zip(transport_labels, transport_options) |> collect,
+    dd_transport = Menu(fig[1, 1], options = zip(transport_labels, transport_options) |> collect,
                         default = "Local Pricing")
+    dd_year = Menu(fig[1, 2], options = collect(years))
 
     # Price axis
-    ax_price = Axis(fig[2, 1:4], title = "Prices", ylabel = "€/MWh", xlabel = "Hour of Year")
+    ax_price = Axis(fig[2, 1:4], title = "Prices", ylabel = "Price [€/MWh]", xlabel = "Hour of Year")
 
     # Dispatch axes per zone
-    ax_dispatch = [Axis(fig[3+i-1, 1:4], title = "Dispatch $(Zs[i])", ylabel = "Generation [MWh]",
+    ax_dispatch = [Axis(fig[2+i, 1:4], title = "Dispatch $(Zs[i])", ylabel = "Generation [MW]",
                         xlabel = "Hour of Year") for i in 1:4]
 
-    # Capacity bar charts
-    ax_cap = [Axis(fig[7, i], title = "$(Zs[i]) Capacities", ylabel = "MW") for i in 1:4]
+    # Shared dispatch legend on the right
+    legend_order = ["Exports", "Storage Injection - Battery", "Storage Injection - Hydrogen",
+                    "Imports", "Storage Extraction - Battery", "Storage Extraction - Hydrogen",
+                    "Generation - Wind offshore", "Generation - Wind onshore",
+                    "Generation - Photovoltaics", "Generation - Loss of Load"]
+    legend_elements = [PolyElement(color = parse(Makie.Colors.Colorant, cmap[k])) for k in legend_order]
+    Legend(fig[3:6, 5], legend_elements, legend_order, framevisible = true, labelsize = 10)
+
+    # Capacity bar charts: 4 rows (Gen, Inj, Ext, Str) × 4 zones
+    ax_gen_cap = [Axis(fig[7, i], title = "$(Zs[i]) Capacities") for i in 1:4]
+    ax_inj_cap = [Axis(fig[8, i]) for i in 1:4]
+    ax_ext_cap = [Axis(fig[9, i]) for i in 1:4]
+    ax_str_cap = [Axis(fig[10, i]) for i in 1:4]
+    ax_gen_cap[1].ylabel = "Gen [MW]"
+    ax_inj_cap[1].ylabel = "Inj [MW]"
+    ax_ext_cap[1].ylabel = "Ext [MW]"
+    ax_str_cap[1].ylabel = "Str [MWh]"
+    for r in 7:10; rowsize!(fig.layout, r, Fixed(100)); end
+
+    all_cap_axes = vcat(ax_gen_cap, ax_inj_cap, ax_ext_cap, ax_str_cap)
 
     sel_year = Observable(2020)
     sel_lp = Observable(true)
@@ -514,20 +534,19 @@ function create_deterministic_cost_minimization_results_visualization()
         ext = r["extraction"]
         fl = r["flow"]
 
-        # Prices
-        for ax in [ax_price; ax_dispatch; ax_cap]
+        for ax in [ax_price; ax_dispatch; all_cap_axes]
             empty!(ax)
         end
 
+        # Prices
         for (iz, z) in enumerate(Zs)
             lines!(ax_price, collect(Ts), [prices[z, t] for t in Ts],
-                   color = [:blue, :red, :green, :orange][iz], label = z)
+                   color = zone_colors[iz], label = z)
         end
-        axislegend(ax_price, position = :rt)
+        axislegend(ax_price, position = :rt, labelsize = 10)
 
         # Dispatch per zone
         for (iz, z) in enumerate(Zs)
-            # Positive: generation + extraction + imports
             pos_keys = String[]
             pos_vals = Vector{Float64}[]
             for g in Gs
@@ -541,10 +560,8 @@ function create_deterministic_cost_minimization_results_visualization()
             push!(pos_keys, "Imports")
             push!(pos_vals, [sum(fl[z2, z, t] for z2 in Zs if z2 != z) for t in Ts])
 
-            # Stack positive
             pos_matrix = hcat(pos_vals...)
             colors_pos = [parse(Makie.Colors.Colorant, cmap[k]) for k in pos_keys]
-
             cumsum_pos = cumsum(pos_matrix, dims = 2)
             xs = collect(Ts)
             for j in size(cumsum_pos, 2):-1:1
@@ -553,7 +570,6 @@ function create_deterministic_cost_minimization_results_visualization()
                 band!(ax_dispatch[iz], xs, lower, upper, color = colors_pos[j])
             end
 
-            # Negative: injection + exports (shown below zero)
             neg_data = zeros(length(Ts))
             for s in Ss
                 vals = [inj[s, z, t] / (s == "Battery" ? 0.95 : 0.60) for t in Ts]
@@ -566,25 +582,29 @@ function create_deterministic_cost_minimization_results_visualization()
                   color = parse(Makie.Colors.Colorant, cmap["Exports"]))
         end
 
-        # Capacity bar charts
-        for (iz, z) in enumerate(Zs)
-            gen_cap = r["generation_capacity"]
-            stor_cap = r["storage_capacity"]
-            inj_cap = r["injection_capacity"]
-            ext_cap = r["extraction_capacity"]
+        # Capacity bar charts by type
+        gen_cap = r["generation_capacity"]
+        stor_cap = r["storage_capacity"]
+        inj_cap_d = r["injection_capacity"]
+        ext_cap_d = r["extraction_capacity"]
 
-            labels_cap = vcat(["Gen $g" for g in Gs],
-                             ["Stor $s" for s in Ss],
-                             ["Inj $s" for s in Ss],
-                             ["Ext $s" for s in Ss])
-            values_cap = vcat([gen_cap[g, z] for g in Gs],
-                             [stor_cap[s, z] for s in Ss],
-                             [inj_cap[s, z] for s in Ss],
-                             [ext_cap[s, z] for s in Ss])
-            barplot!(ax_cap[iz], 1:length(labels_cap), values_cap,
-                     color = 1:length(labels_cap))
-            ax_cap[iz].xticks = (1:length(labels_cap), labels_cap)
-            ax_cap[iz].xticklabelrotation = π/4
+        gen_cols = [parse(Makie.Colors.Colorant, cmap["Generation - $g"]) for g in Gs]
+        stor_inj_cols = [parse(Makie.Colors.Colorant, cmap["Storage Injection - $s"]) for s in Ss]
+        stor_ext_cols = [parse(Makie.Colors.Colorant, cmap["Storage Extraction - $s"]) for s in Ss]
+
+        for (iz, z) in enumerate(Zs)
+            barplot!(ax_gen_cap[iz], 1:4, [gen_cap[g, z] for g in Gs], color = gen_cols)
+            ax_gen_cap[iz].xticks = (1:4, ["W.off", "W.on", "PV", "LoL"])
+            ax_gen_cap[iz].xticklabelrotation = π/4
+
+            barplot!(ax_inj_cap[iz], 1:2, [inj_cap_d[s, z] for s in Ss], color = stor_inj_cols)
+            ax_inj_cap[iz].xticks = (1:2, ["Bat", "H₂"])
+
+            barplot!(ax_ext_cap[iz], 1:2, [ext_cap_d[s, z] for s in Ss], color = stor_ext_cols)
+            ax_ext_cap[iz].xticks = (1:2, ["Bat", "H₂"])
+
+            barplot!(ax_str_cap[iz], 1:2, [stor_cap[s, z] for s in Ss], color = stor_ext_cols)
+            ax_str_cap[iz].xticks = (1:2, ["Bat", "H₂"])
         end
     end
 
@@ -828,20 +848,50 @@ function get_deterministic_strategic_behavior_results(optimizer)
     discount_rate = 0.05
     annuity(r, n) = r / (1 - (1 + r)^(-n))
 
-    lifetime_gen = Dict("Wind offshore" => 30, "Wind onshore" => 30,
-                        "Photovoltaics" => 30, "Loss of Load" => 30)
-    lifetime_storage = Dict("Battery" => 15, "Hydrogen" => 30)
+    lifetime_gen = Dict(
+        "Wind offshore" => 30,
+        "Wind onshore" => 30,
+        "Photovoltaics" => 30,
+        "Loss of Load" => 30,
+    )
+    lifetime_storage = Dict(
+        "Battery" => 15,
+        "Hydrogen" => 30,
+    )
 
-    capex_gen = Dict("Wind offshore" => 2.8e6, "Wind onshore" => 1.2e6,
-                     "Photovoltaics" => 0.6e6, "Loss of Load" => 1.0)
-    mc_gen = Dict("Wind offshore" => 1.0, "Wind onshore" => 1.0,
-                  "Photovoltaics" => 1.0, "Loss of Load" => 1000.0)
+    capex_gen = Dict(
+        "Wind offshore" => 2.8e6,
+        "Wind onshore" => 1.2e6,
+        "Photovoltaics" => 0.6e6,
+        "Loss of Load" => 1.0,
+    )
+    mc_gen = Dict(
+        "Wind offshore" => 1.0,
+        "Wind onshore" => 1.0,
+        "Photovoltaics" => 1.0,
+        "Loss of Load" => 1000.0,
+    )
 
-    capex_storage_energy = Dict("Battery" => 3e5, "Hydrogen" => 3e3)
-    capex_injection = Dict("Battery" => 1.0, "Hydrogen" => 1.4e6)
-    capex_extraction = Dict("Battery" => 1.0, "Hydrogen" => 6e5)
-    η_inj = Dict("Battery" => 0.95, "Hydrogen" => 0.60)
-    η_ext = Dict("Battery" => 0.95, "Hydrogen" => 0.60)
+    capex_storage_energy = Dict(
+        "Battery" => 3e5,
+        "Hydrogen" => 3e3,
+    )
+    capex_injection = Dict(
+        "Battery" => 1.0,
+        "Hydrogen" => 1.4e6,
+    )
+    capex_extraction = Dict(
+        "Battery" => 1.0,
+        "Hydrogen" => 6e5,
+    )
+    η_inj = Dict(
+        "Battery" => 0.95,
+        "Hydrogen" => 0.60,
+    )
+    η_ext = Dict(
+        "Battery" => 0.95,
+        "Hydrogen" => 0.60,
+    )
 
     flow_cost = 1.0
 
@@ -864,10 +914,12 @@ function get_deterministic_strategic_behavior_results(optimizer)
         for row in eachrow(year_data)
             z = row.Area
             t = row.hour_of_year
+
             for g in ["Wind offshore", "Wind onshore", "Photovoltaics"]
                 avail[(g, z, t)] = row["$(g) availability"]
             end
             avail[("Loss of Load", z, t)] = 1.0
+
             a_param[(z, t)] = row.a
             b_param[(z, t)] = row.b
         end
@@ -880,15 +932,15 @@ function get_deterministic_strategic_behavior_results(optimizer)
             @variable(model, storage_capacity[s in Ss, z in Zs] >= 0)
             @variable(model, injection_capacity[s in Ss, z in Zs] >= 0)
             @variable(model, extraction_capacity[s in Ss, z in Zs] >= 0)
+
             @variable(model, generation[f in Fs, g in Gs, z in Zs, t in Ts] >= 0)
             @variable(model, injection[f in Fs, s in Ss, z in Zs, t in Ts] >= 0)
             @variable(model, extraction[f in Fs, s in Ss, z in Zs, t in Ts] >= 0)
             @variable(model, storage_level[f in Fs, s in Ss, z in Zs, t in Ts] >= 0)
             @variable(model, flow[f in Fs, z1 in Zs, z2 in Zs, t in Ts] >= 0)
             @variable(model, Q[f in Fs, z in Zs, t in Ts] >= 0)
-            @variable(model, Q_total[z in Zs, t in Ts] >= 0)
 
-            # Firms only operate in their own zone
+            # Nur Generation in Heimat-Zone
             for f in Fs, g in Gs, z in Zs
                 if f != z
                     fix(generation_capacity[f, g, z], 0.0; force = true)
@@ -897,24 +949,8 @@ function get_deterministic_strategic_behavior_results(optimizer)
                     end
                 end
             end
-            for f in Fs, s in Ss, z in Zs
-                if f != z
-                    for t in Ts
-                        fix(injection[f, s, z, t], 0.0; force = true)
-                        fix(extraction[f, s, z, t], 0.0; force = true)
-                        fix(storage_level[f, s, z, t], 0.0; force = true)
-                    end
-                end
-            end
-            # Firms can only initiate flows from their own zone (same as welfare)
-            for f in Fs, z1 in Zs, z2 in Zs
-                if f != z1
-                    for t in Ts
-                        fix(flow[f, z1, z2, t], 0.0; force = true)
-                    end
-                end
-            end
-            # In local pricing, firms can only sell in their own zone
+
+            # Bei local pricing nur Verkauf in eigener Zone
             if local_pricing
                 for f in Fs, z in Zs, t in Ts
                     if f != z
@@ -923,92 +959,102 @@ function get_deterministic_strategic_behavior_results(optimizer)
                 end
             end
 
-            # Cournot convex reformulation with aggregate coefficient:
-            # For N symmetric firms: Φ = Σ [a*Q_total + (N+1)/(2N)*b*Q_total²] - costs
-            # lp=true: N=1 (monopoly per zone), lp=false: N=4 (all TSOs compete)
-            N_firms = local_pricing ? 1 : length(Fs)
-            cournot_coeff = (N_firms + 1) / (2 * N_firms)
-
-            @constraint(model, q_total_def[z in Zs, t in Ts],
-                Q_total[z, t] == sum(Q[f, z, t] for f in Fs))
+            @expression(model, Q_total[z in Zs, t in Ts], sum(Q[f, z, t] for f in Fs))
 
             @objective(model, Max,
-                sum(a_param[(z, t)] * Q_total[z, t] + cournot_coeff * b_param[(z, t)] * Q_total[z, t]^2
-                    for z in Zs, t in Ts) -
-                sum(af_gen[g] * capex_gen[g] * generation_capacity[f, g, z]
-                    for f in Fs, g in Gs, z in Zs) -
-                sum(af_storage[s] * capex_storage_energy[s] * storage_capacity[s, z]
-                    for s in Ss, z in Zs) -
-                sum(af_storage[s] * capex_injection[s] * injection_capacity[s, z]
-                    for s in Ss, z in Zs) -
-                sum(af_storage[s] * capex_extraction[s] * extraction_capacity[s, z]
-                    for s in Ss, z in Zs) -
-                sum(mc_gen[g] * generation[f, g, z, t]
-                    for f in Fs, g in Gs, z in Zs, t in Ts) -
-                sum(flow_cost * flow[f, z1, z2, t]
-                    for f in Fs, z1 in Zs, z2 in Zs, t in Ts if z1 != z2)
+                sum(
+                    a_param[(z, t)] * Q_total[z, t] +
+                    0.5 * b_param[(z, t)] * Q_total[z, t]^2
+                    for z in Zs, t in Ts
+                )
+                + sum(
+                    0.5 * b_param[(z, t)] * Q[f, z, t]^2
+                    for f in Fs, z in Zs, t in Ts
+                )
+                - sum(
+                    af_gen[g] * capex_gen[g] * generation_capacity[f, g, z]
+                    for f in Fs, g in Gs, z in Zs
+                )
+                - sum(
+                    af_storage[s] * capex_storage_energy[s] * storage_capacity[s, z]
+                    for s in Ss, z in Zs
+                )
+                - sum(
+                    af_storage[s] * capex_injection[s] * injection_capacity[s, z]
+                    for s in Ss, z in Zs
+                )
+                - sum(
+                    af_storage[s] * capex_extraction[s] * extraction_capacity[s, z]
+                    for s in Ss, z in Zs
+                )
+                - sum(
+                    mc_gen[g] * generation[f, g, z, t]
+                    for f in Fs, g in Gs, z in Zs, t in Ts
+                )
+                - sum(
+                    flow_cost * flow[f, z1, z2, t]
+                    for f in Fs, z1 in Zs, z2 in Zs, t in Ts if z1 != z2
+                )
             )
 
-            # Same constraints as welfare model
             @constraint(model, gen_avail[f in Fs, g in Gs, z in Zs, t in Ts],
-                generation[f, g, z, t] <= avail[(g, z, t)] * generation_capacity[f, g, z])
+                generation[f, g, z, t] <= avail[(g, z, t)] * generation_capacity[f, g, z]
+            )
 
             @constraint(model, inj_limit[s in Ss, z in Zs, t in Ts],
-                sum(injection[f, s, z, t] for f in Fs) <= injection_capacity[s, z])
+                sum(injection[f, s, z, t] for f in Fs) <= injection_capacity[s, z]
+            )
 
             @constraint(model, ext_limit[s in Ss, z in Zs, t in Ts],
-                sum(extraction[f, s, z, t] for f in Fs) <= extraction_capacity[s, z])
+                sum(extraction[f, s, z, t] for f in Fs) <= extraction_capacity[s, z]
+            )
 
             @constraint(model, stor_limit[s in Ss, z in Zs, t in Ts],
-                sum(storage_level[f, s, z, t] for f in Fs) <= storage_capacity[s, z])
+                sum(storage_level[f, s, z, t] for f in Fs) <= storage_capacity[s, z]
+            )
 
             @constraint(model, stor_dyn[f in Fs, s in Ss, z in Zs, t in Ts],
-                storage_level[f, s, z, t] == storage_level[f, s, z, previous[t]] +
-                    injection[f, s, z, t] - extraction[f, s, z, t])
-
-            # Aggregate zonal market clearing
-            @constraint(model, market_clearing[z in Zs, t in Ts],
-                sum(generation[f, g, z, t] for f in Fs, g in Gs) +
-                sum(extraction[f, s, z, t] * η_ext[s] for f in Fs, s in Ss) +
-                sum(flow[f, z2, z, t] for f in Fs, z2 in Zs if z2 != z)
-                >=
-                sum(Q[f, z, t] for f in Fs) +
-                sum(injection[f, s, z, t] / η_inj[s] for f in Fs, s in Ss) +
-                sum(flow[f, z, z2, t] for f in Fs, z2 in Zs if z2 != z)
+                storage_level[f, s, z, t] ==
+                    storage_level[f, s, z, previous[t]] +
+                    injection[f, s, z, t] -
+                    extraction[f, s, z, t]
             )
 
-            # Per-firm total balance: prevent phantom sales
-            @constraint(model, firm_total_balance[f in Fs, t in Ts],
-                sum(Q[f, z, t] for z in Zs) ==
-                sum(generation[f, g, z, t] for g in Gs, z in Zs) +
-                sum(extraction[f, s, z, t] * η_ext[s] for s in Ss, z in Zs) -
-                sum(injection[f, s, z, t] / η_inj[s] for s in Ss, z in Zs)
+            @constraint(model, firm_balance[f in Fs, z in Zs, t in Ts],
+                sum(generation[f, g, z, t] for g in Gs) +
+                sum(extraction[f, s, z, t] * η_ext[s] for s in Ss) +
+                sum(flow[f, z2, z, t] for z2 in Zs if z2 != z)
+                ==
+                Q[f, z, t] +
+                sum(injection[f, s, z, t] / η_inj[s] for s in Ss) +
+                sum(flow[f, z, z2, t] for z2 in Zs if z2 != z)
             )
 
-            # Flow constraints (same as welfare)
             if local_pricing
                 @constraint(model, no_flow[f in Fs, z1 in Zs, z2 in Zs, t in Ts; z1 != z2],
-                    flow[f, z1, z2, t] == 0)
+                    flow[f, z1, z2, t] == 0
+                )
             else
                 @constraint(model, flow_cap[f in Fs, z1 in Zs, z2 in Zs, t in Ts; z1 != z2],
-                    flow[f, z1, z2, t] <= 100_000)
+                    flow[f, z1, z2, t] <= 100_000
+                )
             end
 
             @constraint(model, no_self_flow[f in Fs, z in Zs, t in Ts],
-                flow[f, z, z, t] == 0)
+                flow[f, z, z, t] == 0
+            )
 
             optimize!(model)
             status = JuMP.termination_status(model)
             @assert status in (MOI.OPTIMAL, MOI.LOCALLY_SOLVED) "Strategic y=$year lp=$local_pricing: status=$status"
 
             prices_arr = JuMP.Containers.DenseAxisArray(
-                [a_param[(z, t)] + b_param[(z, t)] * sum(value(Q[f, z, t]) for f in Fs)
-                 for z in Zs, t in Ts],
+                [a_param[(z, t)] + b_param[(z, t)] * value(Q_total[z, t]) for z in Zs, t in Ts],
                 Zs, collect(Ts)
             )
 
             demand_arr = JuMP.Containers.DenseAxisArray(
-                [sum(value(Q[f, z, t]) for f in Fs) for z in Zs, t in Ts],
+                [value(Q_total[z, t]) for z in Zs, t in Ts],
                 Zs, collect(Ts)
             )
 
@@ -1025,6 +1071,7 @@ function get_deterministic_strategic_behavior_results(optimizer)
                 "total_cost"          => objective_value(model),
                 "flow"                => value.(flow),
                 "extraction_capacity" => value.(extraction_capacity),
+                "Q"                   => value.(Q),
             )
         end
     end
@@ -1061,6 +1108,8 @@ function create_deterministic_elastic_results_visualization()
         "Generation - Photovoltaics"     => "#ffeb3b",
     )
 
+    zone_colors = [colorant"#1565c0", colorant"#f9a825", colorant"#2e7d32", colorant"#8e24aa"]
+
     Gs = ["Wind offshore", "Wind onshore", "Photovoltaics", "Loss of Load"]
     Ss = ["Battery", "Hydrogen"]
     Zs = ["50Hertz", "Amprion", "TenneT", "TransnetBW"]
@@ -1073,17 +1122,37 @@ function create_deterministic_elastic_results_visualization()
     all_results = Dict("Perfect Competition" => welfare_results,
                        "Strategic" => strategic_results)
 
-    fig = Figure(size = (1400, 1000))
+    fig = Figure(size = (1600, 1200))
 
     dd_behavior = Menu(fig[1, 1], options = behavior_labels)
     dd_transport = Menu(fig[1, 2], options = zip(transport_labels, [true, false]) |> collect,
                         default = "Local Pricing")
     dd_year = Menu(fig[1, 3], options = collect(years))
 
-    ax_price = Axis(fig[2, 1:4], title = "Prices", ylabel = "€/MWh", xlabel = "Hour of Year")
-    ax_dispatch = [Axis(fig[3+i-1, 1:4], title = "Dispatch $(Zs[i])", ylabel = "Generation [MWh]",
+    ax_price = Axis(fig[2, 1:4], title = "Prices", ylabel = "Price [€/MWh]", xlabel = "Hour of Year")
+    ax_dispatch = [Axis(fig[2+i, 1:4], title = "Dispatch $(Zs[i])", ylabel = "Generation [MW]",
                         xlabel = "Hour of Year") for i in 1:4]
-    ax_cap = [Axis(fig[7, i], title = "$(Zs[i]) Capacities", ylabel = "MW") for i in 1:4]
+
+    # Shared dispatch legend on the right
+    legend_order = ["Exports", "Storage Injection - Battery", "Storage Injection - Hydrogen",
+                    "Imports", "Storage Extraction - Battery", "Storage Extraction - Hydrogen",
+                    "Generation - Wind offshore", "Generation - Wind onshore",
+                    "Generation - Photovoltaics", "Generation - Loss of Load"]
+    legend_elements = [PolyElement(color = parse(Makie.Colors.Colorant, cmap[k])) for k in legend_order]
+    Legend(fig[3:6, 5], legend_elements, legend_order, framevisible = true, labelsize = 10)
+
+    # Capacity bar charts: 4 rows × 4 zones
+    ax_gen_cap = [Axis(fig[7, i], title = "$(Zs[i]) Capacities") for i in 1:4]
+    ax_inj_cap = [Axis(fig[8, i]) for i in 1:4]
+    ax_ext_cap = [Axis(fig[9, i]) for i in 1:4]
+    ax_str_cap = [Axis(fig[10, i]) for i in 1:4]
+    ax_gen_cap[1].ylabel = "Gen [MW]"
+    ax_inj_cap[1].ylabel = "Inj [MW]"
+    ax_ext_cap[1].ylabel = "Ext [MW]"
+    ax_str_cap[1].ylabel = "Str [MWh]"
+    for r in 7:10; rowsize!(fig.layout, r, Fixed(100)); end
+
+    all_cap_axes = vcat(ax_gen_cap, ax_inj_cap, ax_ext_cap, ax_str_cap)
 
     sel_behavior = Observable("Perfect Competition")
     sel_lp = Observable(true)
@@ -1107,16 +1176,16 @@ function create_deterministic_elastic_results_visualization()
         ext_4d = r["extraction"]   # [f, s, z, t]
         fl_4d = r["flow"]          # [f, z1, z2, t]
 
-        for ax in [ax_price; ax_dispatch; ax_cap]
+        for ax in [ax_price; ax_dispatch; all_cap_axes]
             empty!(ax)
         end
 
         # Prices
         for (iz, z) in enumerate(Zs)
             lines!(ax_price, collect(Ts), [prices[z, t] for t in Ts],
-                   color = [:blue, :red, :green, :orange][iz], label = z)
+                   color = zone_colors[iz], label = z)
         end
-        axislegend(ax_price, position = :rt)
+        axislegend(ax_price, position = :rt, labelsize = 10)
 
         # Dispatch per zone - aggregate over firms
         for (iz, z) in enumerate(Zs)
@@ -1159,25 +1228,29 @@ function create_deterministic_elastic_results_visualization()
                   color = parse(Makie.Colors.Colorant, cmap["Exports"]))
         end
 
-        # Capacity bars
-        for (iz, z) in enumerate(Zs)
-            gen_cap = r["generation_capacity"]  # [f, g, z]
-            stor_cap = r["storage_capacity"]
-            inj_cap = r["injection_capacity"]
-            ext_cap = r["extraction_capacity"]
+        # Capacity bars by type
+        gen_cap = r["generation_capacity"]  # [f, g, z]
+        stor_cap = r["storage_capacity"]
+        inj_cap_d = r["injection_capacity"]
+        ext_cap_d = r["extraction_capacity"]
 
-            labels_cap = vcat(["Gen $g" for g in Gs],
-                             ["Stor $s" for s in Ss],
-                             ["Inj $s" for s in Ss],
-                             ["Ext $s" for s in Ss])
-            values_cap = vcat([sum(gen_cap[f, g, z] for f in Fs) for g in Gs],
-                             [stor_cap[s, z] for s in Ss],
-                             [inj_cap[s, z] for s in Ss],
-                             [ext_cap[s, z] for s in Ss])
-            barplot!(ax_cap[iz], 1:length(labels_cap), values_cap,
-                     color = 1:length(labels_cap))
-            ax_cap[iz].xticks = (1:length(labels_cap), labels_cap)
-            ax_cap[iz].xticklabelrotation = π/4
+        gen_cols = [parse(Makie.Colors.Colorant, cmap["Generation - $g"]) for g in Gs]
+        stor_inj_cols = [parse(Makie.Colors.Colorant, cmap["Storage Injection - $s"]) for s in Ss]
+        stor_ext_cols = [parse(Makie.Colors.Colorant, cmap["Storage Extraction - $s"]) for s in Ss]
+
+        for (iz, z) in enumerate(Zs)
+            barplot!(ax_gen_cap[iz], 1:4, [sum(gen_cap[f, g, z] for f in Fs) for g in Gs], color = gen_cols)
+            ax_gen_cap[iz].xticks = (1:4, ["W.off", "W.on", "PV", "LoL"])
+            ax_gen_cap[iz].xticklabelrotation = π/4
+
+            barplot!(ax_inj_cap[iz], 1:2, [inj_cap_d[s, z] for s in Ss], color = stor_inj_cols)
+            ax_inj_cap[iz].xticks = (1:2, ["Bat", "H₂"])
+
+            barplot!(ax_ext_cap[iz], 1:2, [ext_cap_d[s, z] for s in Ss], color = stor_ext_cols)
+            ax_ext_cap[iz].xticks = (1:2, ["Bat", "H₂"])
+
+            barplot!(ax_str_cap[iz], 1:2, [stor_cap[s, z] for s in Ss], color = stor_ext_cols)
+            ax_str_cap[iz].xticks = (1:2, ["Bat", "H₂"])
         end
     end
 
@@ -1430,6 +1503,8 @@ function create_stochastic_cost_minimization_results_visualization()
         "Generation - Photovoltaics"     => "#ffeb3b",
     )
 
+    zone_colors = [colorant"#1565c0", colorant"#f9a825", colorant"#2e7d32", colorant"#8e24aa"]
+
     Gs = ["Wind offshore", "Wind onshore", "Photovoltaics", "Loss of Load"]
     Ss = ["Battery", "Hydrogen"]
     Zs = ["50Hertz", "Amprion", "TenneT", "TransnetBW"]
@@ -1442,13 +1517,33 @@ function create_stochastic_cost_minimization_results_visualization()
     end
     available_years = sort(collect(keys(year_to_idx)))
 
-    fig = Figure(size = (1400, 1000))
+    fig = Figure(size = (1600, 1200))
     dd_year = Menu(fig[1, 1], options = available_years)
 
-    ax_price = Axis(fig[2, 1:4], title = "Prices", ylabel = "€/MWh", xlabel = "Hour of Year")
-    ax_dispatch = [Axis(fig[3+i-1, 1:4], title = "Dispatch $(Zs[i])", ylabel = "Generation [MWh]",
+    ax_price = Axis(fig[2, 1:4], title = "Prices", ylabel = "Price [€/MWh]", xlabel = "Hour of Year")
+    ax_dispatch = [Axis(fig[2+i, 1:4], title = "Dispatch $(Zs[i])", ylabel = "Generation [MW]",
                         xlabel = "Hour of Year") for i in 1:4]
-    ax_cap = [Axis(fig[7, i], title = "$(Zs[i]) Capacities", ylabel = "MW") for i in 1:4]
+
+    # Shared dispatch legend on the right
+    legend_order = ["Exports", "Storage Injection - Battery", "Storage Injection - Hydrogen",
+                    "Imports", "Storage Extraction - Battery", "Storage Extraction - Hydrogen",
+                    "Generation - Wind offshore", "Generation - Wind onshore",
+                    "Generation - Photovoltaics", "Generation - Loss of Load"]
+    legend_elements = [PolyElement(color = parse(Makie.Colors.Colorant, cmap[k])) for k in legend_order]
+    Legend(fig[3:6, 5], legend_elements, legend_order, framevisible = true, labelsize = 10)
+
+    # Capacity bar charts: 4 rows × 4 zones
+    ax_gen_cap = [Axis(fig[7, i], title = "$(Zs[i]) Capacities") for i in 1:4]
+    ax_inj_cap = [Axis(fig[8, i]) for i in 1:4]
+    ax_ext_cap = [Axis(fig[9, i]) for i in 1:4]
+    ax_str_cap = [Axis(fig[10, i]) for i in 1:4]
+    ax_gen_cap[1].ylabel = "Gen [MW]"
+    ax_inj_cap[1].ylabel = "Inj [MW]"
+    ax_ext_cap[1].ylabel = "Ext [MW]"
+    ax_str_cap[1].ylabel = "Str [MWh]"
+    for r in 7:10; rowsize!(fig.layout, r, Fixed(100)); end
+
+    all_cap_axes = vcat(ax_gen_cap, ax_inj_cap, ax_ext_cap, ax_str_cap)
 
     function update_plot(year)
         idx = year_to_idx[year]
@@ -1459,15 +1554,15 @@ function create_stochastic_cost_minimization_results_visualization()
         ext = r[:extraction]
         fl = r[:flow]
 
-        for ax in [ax_price; ax_dispatch; ax_cap]
+        for ax in [ax_price; ax_dispatch; all_cap_axes]
             empty!(ax)
         end
 
         for (iz, z) in enumerate(Zs)
             lines!(ax_price, collect(Ts), [prices[z, t] for t in Ts],
-                   color = [:blue, :red, :green, :orange][iz], label = z)
+                   color = zone_colors[iz], label = z)
         end
-        axislegend(ax_price, position = :rt)
+        axislegend(ax_price, position = :rt, labelsize = 10)
 
         for (iz, z) in enumerate(Zs)
             xs = collect(Ts)
@@ -1508,24 +1603,29 @@ function create_stochastic_cost_minimization_results_visualization()
                   color = parse(Makie.Colors.Colorant, cmap["Exports"]))
         end
 
-        for (iz, z) in enumerate(Zs)
-            gen_cap = r[:generation_capacity]
-            stor_cap = r[:storage_capacity]
-            inj_cap = r[:injection_capacity]
-            ext_cap = r[:extraction_capacity]
+        # Capacity bars by type
+        gen_cap = r[:generation_capacity]
+        stor_cap = r[:storage_capacity]
+        inj_cap_d = r[:injection_capacity]
+        ext_cap_d = r[:extraction_capacity]
 
-            labels_cap = vcat(["Gen $g" for g in Gs],
-                             ["Stor $s" for s in Ss],
-                             ["Inj $s" for s in Ss],
-                             ["Ext $s" for s in Ss])
-            values_cap = vcat([gen_cap[g, z].out for g in Gs],
-                             [stor_cap[s, z].out for s in Ss],
-                             [inj_cap[s, z].out for s in Ss],
-                             [ext_cap[s, z].out for s in Ss])
-            barplot!(ax_cap[iz], 1:length(labels_cap), values_cap,
-                     color = 1:length(labels_cap))
-            ax_cap[iz].xticks = (1:length(labels_cap), labels_cap)
-            ax_cap[iz].xticklabelrotation = π/4
+        gen_cols = [parse(Makie.Colors.Colorant, cmap["Generation - $g"]) for g in Gs]
+        stor_inj_cols = [parse(Makie.Colors.Colorant, cmap["Storage Injection - $s"]) for s in Ss]
+        stor_ext_cols = [parse(Makie.Colors.Colorant, cmap["Storage Extraction - $s"]) for s in Ss]
+
+        for (iz, z) in enumerate(Zs)
+            barplot!(ax_gen_cap[iz], 1:4, [gen_cap[g, z].out for g in Gs], color = gen_cols)
+            ax_gen_cap[iz].xticks = (1:4, ["W.off", "W.on", "PV", "LoL"])
+            ax_gen_cap[iz].xticklabelrotation = π/4
+
+            barplot!(ax_inj_cap[iz], 1:2, [inj_cap_d[s, z].out for s in Ss], color = stor_inj_cols)
+            ax_inj_cap[iz].xticks = (1:2, ["Bat", "H₂"])
+
+            barplot!(ax_ext_cap[iz], 1:2, [ext_cap_d[s, z].out for s in Ss], color = stor_ext_cols)
+            ax_ext_cap[iz].xticks = (1:2, ["Bat", "H₂"])
+
+            barplot!(ax_str_cap[iz], 1:2, [stor_cap[s, z].out for s in Ss], color = stor_ext_cols)
+            ax_str_cap[iz].xticks = (1:2, ["Bat", "H₂"])
         end
     end
 
