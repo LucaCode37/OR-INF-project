@@ -1,7 +1,9 @@
-results/
-test_data/
+results/*
+test_data/*
 *.cuts.json
 *.mof.json
 *.log
 .DS_Store
 *.pdf
+!results/.gitkeep
+!test_data/.gitkeep
