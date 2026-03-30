@@ -529,7 +529,7 @@ function create_deterministic_cost_minimization_results_visualization()
     results_path = joinpath(@__DIR__, "results", "deterministic_cost_minimization_results.jld2")
     results = load(results_path, "deterministic_cost_minimization_results")
 
-    cmap = Dict(
+    color_map = Dict(
         "Storage Injection - Battery"    => "#ae393f",
         "Storage Injection - Hydrogen"   => "#0d47a1",
         "Storage Extraction - Battery"   => "#ae393f",
@@ -542,147 +542,210 @@ function create_deterministic_cost_minimization_results_visualization()
         "Generation - Photovoltaics"     => "#ffeb3b",
     )
 
-    zone_colors = [colorant"#1565c0", colorant"#f9a825", colorant"#2e7d32", colorant"#8e24aa"]
+    zone_colors = [
+        colorant"#1565c0",
+        colorant"#f9a825",
+        colorant"#2e7d32",
+        colorant"#8e24aa",
+    ]
 
-    Gs = ["Wind offshore", "Wind onshore", "Photovoltaics", "Loss of Load"]
-    Ss = ["Battery", "Hydrogen"]
-    Zs = ["50Hertz", "Amprion", "TenneT", "TransnetBW"]
-    Ts = 1:8760
+    generation_technologies_local = ["Wind offshore", "Wind onshore", "Photovoltaics", "Loss of Load"]
+    storage_technologies_local = ["Battery", "Hydrogen"]
+    zones_local = ["50Hertz", "Amprion", "TenneT", "TransnetBW"]
+    hours = 1:8760
     years = 2020:2025
+
     transport_options = [true, false]
     transport_labels = ["Local Pricing", "Perfect Competition"]
 
     fig = Figure(size = (1600, 1200))
 
-    dd_transport = Menu(fig[1, 1], options = zip(transport_labels, transport_options) |> collect,
-                        default = "Local Pricing")
-    dd_year = Menu(fig[1, 2], options = collect(years))
+    transport_menu = Menu(fig[1, 1], options = collect(zip(transport_labels, transport_options)), default = "Local Pricing",)
+    year_menu = Menu(fig[1, 2], options = collect(years))
 
-    # Price axis
-    ax_price = Axis(fig[2, 1:4], title = "Prices", ylabel = "Price [€/MWh]", xlabel = "Hour of Year")
+    price_axis = Axis(fig[2, 1:4], title = "Prices", ylabel = "Price [€/MWh]", xlabel = "Hour of Year",)
 
-    # Dispatch axes per zone
-    ax_dispatch = [Axis(fig[2+i, 1:4], title = "Dispatch $(Zs[i])", ylabel = "Generation [MW]",
-                        xlabel = "Hour of Year") for i in 1:4]
+    dispatch_axes = [
+        Axis(fig[2 + zone_number, 1:4], title = "Dispatch $(zones_local[zone_number])", ylabel = "Generation [MW]", xlabel = "Hour of Year",)
+        for zone_number in 1:4
+    ]
 
-    # Shared dispatch legend on the right
-    legend_order = ["Exports", "Storage Injection - Battery", "Storage Injection - Hydrogen",
-                    "Imports", "Storage Extraction - Battery", "Storage Extraction - Hydrogen",
-                    "Generation - Wind offshore", "Generation - Wind onshore",
-                    "Generation - Photovoltaics", "Generation - Loss of Load"]
-    legend_elements = [PolyElement(color = parse(Makie.Colors.Colorant, cmap[k])) for k in legend_order]
+    legend_order = [
+        "Exports",
+        "Storage Injection - Battery",
+        "Storage Injection - Hydrogen",
+        "Imports",
+        "Storage Extraction - Battery",
+        "Storage Extraction - Hydrogen",
+        "Generation - Wind offshore",
+        "Generation - Wind onshore",
+        "Generation - Photovoltaics",
+        "Generation - Loss of Load",
+    ]
+    legend_elements = [
+        PolyElement(color = parse(Makie.Colors.Colorant, color_map[label]))
+        for label in legend_order
+    ]
     Legend(fig[3:6, 5], legend_elements, legend_order, framevisible = true, labelsize = 10)
 
-    ax_gen_cap = [Axis(fig[7, i], title = "$(Zs[i]) Capacities") for i in 1:4]
-    ax_inj_cap = [Axis(fig[8, i]) for i in 1:4]
-    ax_ext_cap = [Axis(fig[9, i]) for i in 1:4]
-    ax_str_cap = [Axis(fig[10, i]) for i in 1:4]
-    ax_gen_cap[1].ylabel = "Gen [MW]"
-    ax_inj_cap[1].ylabel = "Inj [MW]"
-    ax_ext_cap[1].ylabel = "Ext [MW]"
-    ax_str_cap[1].ylabel = "Str [MWh]"
-    for r in 7:10; rowsize!(fig.layout, r, Fixed(100)); end
+    generation_capacity_axes = [Axis(fig[7, i], title = "$(zones_local[i]) Capacities") for i in 1:4]
+    injection_capacity_axes = [Axis(fig[8, i]) for i in 1:4]
+    extraction_capacity_axes = [Axis(fig[9, i]) for i in 1:4]
+    storage_capacity_axes = [Axis(fig[10, i]) for i in 1:4]
 
-    all_cap_axes = vcat(ax_gen_cap, ax_inj_cap, ax_ext_cap, ax_str_cap)
+    generation_capacity_axes[1].ylabel = "Gen [MW]"
+    injection_capacity_axes[1].ylabel = "Inj [MW]"
+    extraction_capacity_axes[1].ylabel = "Ext [MW]"
+    storage_capacity_axes[1].ylabel = "Str [MWh]"
 
-    zone_legend_elements = [LineElement(color = zone_colors[iz]) for iz in 1:4]
-    Legend(fig[2, 5], zone_legend_elements, Zs, framevisible = true, labelsize = 10)
-
-    sel_year = Observable(2020)
-    sel_lp = Observable(true)
-
-    on(dd_year.selection) do val
-        sel_year[] = val
+    for row in 7:10
+        rowsize!(fig.layout, row, Fixed(100))
     end
 
-    on(dd_transport.selection) do val
-        sel_lp[] = val[2]
+    all_capacity_axes = vcat(
+        generation_capacity_axes,
+        injection_capacity_axes,
+        extraction_capacity_axes,
+        storage_capacity_axes,
+    )
+
+    zone_legend_elements = [LineElement(color = zone_colors[zone_number]) for zone_number in 1:4]
+    Legend(fig[2, 5], zone_legend_elements, zones_local, framevisible = true, labelsize = 10)
+
+    selected_year = Observable(2020)
+    selected_local_pricing = Observable(true)
+
+    on(year_menu.selection) do value
+        selected_year[] = value
     end
 
-    function update_plot(year, lp)
-        r = results[year, lp]
-        prices = r["prices"]
-        gen = r["generation"]
-        inj = r["injection"]
-        ext = r["extraction"]
-        fl = r["flow"]
+    on(transport_menu.selection) do value
+        selected_local_pricing[] = value[2]
+    end
 
-        for ax in [ax_price; ax_dispatch; all_cap_axes]
-            empty!(ax)
+    function update_plot(year, local_pricing)
+        result = results[year, local_pricing]
+        prices = result["prices"]
+        generation = result["generation"]
+        injection = result["injection"]
+        extraction = result["extraction"]
+        flow = result["flow"]
+
+        for axis in [price_axis; dispatch_axes; all_capacity_axes]
+            empty!(axis)
         end
 
-        # Prices
-        for (iz, z) in enumerate(Zs)
-            lines!(ax_price, collect(Ts), [prices[z, t] for t in Ts],
-                   color = zone_colors[iz])
+        for (zone_number, zone) in enumerate(zones_local)
+            lines!(price_axis, collect(hours), [prices[zone, hour] for hour in hours], color = zone_colors[zone_number],)
         end
 
-        # Dispatch per zone
-        for (iz, z) in enumerate(Zs)
-            pos_keys = String[]
-            pos_vals = Vector{Float64}[]
-            for g in Gs
-                push!(pos_keys, "Generation - $g")
-                push!(pos_vals, [gen[g, z, t] for t in Ts])
-            end
-            for s in Ss
-                push!(pos_keys, "Storage Extraction - $s")
-                push!(pos_vals, [ext[s, z, t] * (s == "Battery" ? 0.95 : 0.60) for t in Ts])
-            end
-            push!(pos_keys, "Imports")
-            push!(pos_vals, [sum(fl[z2, z, t] for z2 in Zs if z2 != z) for t in Ts])
+        for (zone_number, zone) in enumerate(zones_local)
+            x_values = collect(hours)
+            positive_labels = String[]
+            positive_series = Vector{Float64}[]
 
-            pos_matrix = hcat(pos_vals...)
-            colors_pos = [parse(Makie.Colors.Colorant, cmap[k]) for k in pos_keys]
-            cumsum_pos = cumsum(pos_matrix, dims = 2)
-            xs = collect(Ts)
-            for j in size(cumsum_pos, 2):-1:1
-                upper = cumsum_pos[:, j]
-                lower = j > 1 ? cumsum_pos[:, j-1] : zeros(length(Ts))
-                band!(ax_dispatch[iz], xs, lower, upper, color = colors_pos[j])
+            for technology in generation_technologies_local
+                push!(positive_labels, "Generation - $technology")
+                push!(positive_series, [generation[technology, zone, hour] for hour in hours],)
             end
 
-            neg_data = zeros(length(Ts))
-            for s in Ss
-                vals = [inj[s, z, t] / (s == "Battery" ? 0.95 : 0.60) for t in Ts]
-                band!(ax_dispatch[iz], xs, neg_data .- vals, neg_data,
-                      color = parse(Makie.Colors.Colorant, cmap["Storage Injection - $s"]))
-                neg_data .-= vals
+            for storage_technology in storage_technologies_local
+                efficiency = storage_technology == "Battery" ? 0.95 : 0.60
+                push!(positive_labels, "Storage Extraction - $storage_technology")
+                push!(positive_series, [extraction[storage_technology, zone, hour] * efficiency for hour in hours],)
             end
-            exports = [sum(fl[z, z2, t] for z2 in Zs if z2 != z) for t in Ts]
-            band!(ax_dispatch[iz], xs, neg_data .- exports, neg_data,
-                  color = parse(Makie.Colors.Colorant, cmap["Exports"]))
-            hlines!(ax_dispatch[iz], [0], color = :black, linewidth = 0.5)
+
+            push!(positive_labels, "Imports")
+            push!(positive_series, [sum(flow[other_zone, zone, hour] for other_zone in zones_local if other_zone != zone) for hour in hours],)
+
+            stacked_positive_values = hcat(positive_series...)
+            positive_colors = [
+                parse(Makie.Colors.Colorant, color_map[label])
+                for label in positive_labels
+            ]
+            cumulative_positive_values = cumsum(stacked_positive_values, dims = 2)
+
+            for layer in size(cumulative_positive_values, 2):-1:1
+                upper_boundary = cumulative_positive_values[:, layer]
+                lower_boundary = layer > 1 ? cumulative_positive_values[:, layer - 1] : zeros(length(hours))
+                band!(dispatch_axes[zone_number], x_values, lower_boundary, upper_boundary, color = positive_colors[layer],)
+            end
+
+            negative_stack = zeros(length(hours))
+            for storage_technology in storage_technologies_local
+                efficiency = storage_technology == "Battery" ? 0.95 : 0.60
+                charging_values = [
+                    injection[storage_technology, zone, hour] / efficiency
+                    for hour in hours
+                ]
+                band!(dispatch_axes[zone_number], x_values, negative_stack .- charging_values, negative_stack, color = parse(Makie.Colors.Colorant, color_map["Storage Injection - $storage_technology"]),)
+                negative_stack .-= charging_values
+            end
+
+            export_values = [
+                sum(flow[zone, other_zone, hour] for other_zone in zones_local if other_zone != zone)
+                for hour in hours
+            ]
+            band!(dispatch_axes[zone_number], x_values, negative_stack .- export_values, negative_stack,color = parse(Makie.Colors.Colorant, color_map["Exports"]),)
+            hlines!(dispatch_axes[zone_number], [0], color = :black, linewidth = 0.5)
         end
 
-        # Capacity bar charts by type
-        gen_cap = r["generation_capacity"]
-        stor_cap = r["storage_capacity"]
-        inj_cap_d = r["injection_capacity"]
-        ext_cap_d = r["extraction_capacity"]
+        generation_capacity = result["generation_capacity"]
+        storage_capacity = result["storage_capacity"]
+        injection_capacity = result["injection_capacity"]
+        extraction_capacity = result["extraction_capacity"]
 
-        gen_cols = [parse(Makie.Colors.Colorant, cmap["Generation - $g"]) for g in Gs]
-        stor_inj_cols = [parse(Makie.Colors.Colorant, cmap["Storage Injection - $s"]) for s in Ss]
-        stor_ext_cols = [parse(Makie.Colors.Colorant, cmap["Storage Extraction - $s"]) for s in Ss]
+        generation_colors = [
+            parse(Makie.Colors.Colorant, color_map["Generation - $technology"])
+            for technology in generation_technologies_local
+        ]
+        injection_colors = [
+            parse(Makie.Colors.Colorant, color_map["Storage Injection - $storage_technology"])
+            for storage_technology in storage_technologies_local
+        ]
+        extraction_colors = [
+            parse(Makie.Colors.Colorant, color_map["Storage Extraction - $storage_technology"])
+            for storage_technology in storage_technologies_local
+        ]
 
-        for (iz, z) in enumerate(Zs)
-            barplot!(ax_gen_cap[iz], 1:4, [gen_cap[g, z] for g in Gs], color = gen_cols)
-            ax_gen_cap[iz].xticks = (1:4, ["W.off", "W.on", "PV", "LoL"])
-            ax_gen_cap[iz].xticklabelrotation = π/4
+        for (zone_number, zone) in enumerate(zones_local)
+            barplot!(
+                generation_capacity_axes[zone_number],
+                1:4,
+                [generation_capacity[technology, zone] for technology in generation_technologies_local],
+                color = generation_colors,
+            )
+            generation_capacity_axes[zone_number].xticks = (1:4, ["W.off", "W.on", "PV", "LoL"])
+            generation_capacity_axes[zone_number].xticklabelrotation = π / 4
 
-            barplot!(ax_inj_cap[iz], 1:2, [inj_cap_d[s, z] for s in Ss], color = stor_inj_cols)
-            ax_inj_cap[iz].xticks = (1:2, ["Bat", "H₂"])
+            barplot!(
+                injection_capacity_axes[zone_number],
+                1:2,
+                [injection_capacity[storage_technology, zone] for storage_technology in storage_technologies_local],
+                color = injection_colors,
+            )
+            injection_capacity_axes[zone_number].xticks = (1:2, ["Bat", "H₂"])
 
-            barplot!(ax_ext_cap[iz], 1:2, [ext_cap_d[s, z] for s in Ss], color = stor_ext_cols)
-            ax_ext_cap[iz].xticks = (1:2, ["Bat", "H₂"])
+            barplot!(
+                extraction_capacity_axes[zone_number],
+                1:2,
+                [extraction_capacity[storage_technology, zone] for storage_technology in storage_technologies_local],
+                color = extraction_colors,
+            )
+            extraction_capacity_axes[zone_number].xticks = (1:2, ["Bat", "H₂"])
 
-            barplot!(ax_str_cap[iz], 1:2, [stor_cap[s, z] for s in Ss], color = stor_ext_cols)
-            ax_str_cap[iz].xticks = (1:2, ["Bat", "H₂"])
+            barplot!(
+                storage_capacity_axes[zone_number],
+                1:2,
+                [storage_capacity[storage_technology, zone] for storage_technology in storage_technologies_local],
+                color = extraction_colors,
+            )
+            storage_capacity_axes[zone_number].xticks = (1:2, ["Bat", "H₂"])
         end
     end
 
-    onany(sel_year, sel_lp) do year, lp
-        update_plot(year, lp)
+    onany(selected_year, selected_local_pricing) do year, local_pricing
+        update_plot(year, local_pricing)
     end
 
     update_plot(2020, true)
@@ -1013,7 +1076,7 @@ function create_deterministic_elastic_results_visualization()
     strategic_path = joinpath(@__DIR__, "results", "deterministic_strategic_behavior_results.jld2")
     strategic_results = load(strategic_path, "deterministic_strategic_behavior_results")
 
-    cmap = Dict(
+    color_map = Dict(
         "Storage Injection - Battery"    => "#ae393f",
         "Storage Injection - Hydrogen"   => "#0d47a1",
         "Storage Extraction - Battery"   => "#ae393f",
@@ -1026,157 +1089,205 @@ function create_deterministic_elastic_results_visualization()
         "Generation - Photovoltaics"     => "#ffeb3b",
     )
 
-    zone_colors = [colorant"#1565c0", colorant"#f9a825", colorant"#2e7d32", colorant"#8e24aa"]
+    zone_colors = [
+        colorant"#1565c0",
+        colorant"#f9a825",
+        colorant"#2e7d32",
+        colorant"#8e24aa",
+    ]
 
-    Gs = ["Wind offshore", "Wind onshore", "Photovoltaics", "Loss of Load"]
-    Ss = ["Battery", "Hydrogen"]
-    Zs = ["50Hertz", "Amprion", "TenneT", "TransnetBW"]
-    Fs = Zs
-    Ts = 1:8760
+    generation_technologies_local = ["Wind offshore", "Wind onshore", "Photovoltaics", "Loss of Load"]
+    storage_technologies_local = ["Battery", "Hydrogen"]
+    zones_local = ["50Hertz", "Amprion", "TenneT", "TransnetBW"]
+    firms = zones_local
+    hours = 1:8760
     years = 2020:2025
+
     transport_labels = ["Local Pricing", "Perfect Competition"]
     behavior_labels = ["Perfect Competition", "Strategic"]
 
-    all_results = Dict("Perfect Competition" => welfare_results,
-                       "Strategic" => strategic_results)
+    all_results = Dict(
+        "Perfect Competition" => welfare_results,
+        "Strategic" => strategic_results,
+    )
 
     fig = Figure(size = (1600, 1200))
 
-    dd_behavior = Menu(fig[1, 1], options = behavior_labels)
-    dd_transport = Menu(fig[1, 2], options = zip(transport_labels, [true, false]) |> collect,
-                        default = "Local Pricing")
-    dd_year = Menu(fig[1, 3], options = collect(years))
+    behavior_menu = Menu(fig[1, 1], options = behavior_labels)
+    transport_menu = Menu(fig[1, 2], options = collect(zip(transport_labels, [true, false])), default = "Local Pricing",)
+    year_menu = Menu(fig[1, 3], options = collect(years))
 
-    ax_price = Axis(fig[2, 1:4], title = "Prices", ylabel = "Price [€/MWh]", xlabel = "Hour of Year")
-    ax_dispatch = [Axis(fig[2+i, 1:4], title = "Dispatch $(Zs[i])", ylabel = "Generation [MW]",
-                        xlabel = "Hour of Year") for i in 1:4]
+    price_axis = Axis(fig[2, 1:4], title = "Prices", ylabel = "Price [€/MWh]", xlabel = "Hour of Year",)
 
-    # Shared dispatch legend on the right
-    legend_order = ["Exports", "Storage Injection - Battery", "Storage Injection - Hydrogen",
-                    "Imports", "Storage Extraction - Battery", "Storage Extraction - Hydrogen",
-                    "Generation - Wind offshore", "Generation - Wind onshore",
-                    "Generation - Photovoltaics", "Generation - Loss of Load"]
-    legend_elements = [PolyElement(color = parse(Makie.Colors.Colorant, cmap[k])) for k in legend_order]
+    dispatch_axes = [
+        Axis(fig[2 + zone_number, 1:4], title = "Dispatch $(zones_local[zone_number])", ylabel = "Generation [MW]", xlabel = "Hour of Year",)
+        for zone_number in 1:4
+    ]
+
+    legend_order = [
+        "Exports",
+        "Storage Injection - Battery",
+        "Storage Injection - Hydrogen",
+        "Imports",
+        "Storage Extraction - Battery",
+        "Storage Extraction - Hydrogen",
+        "Generation - Wind offshore",
+        "Generation - Wind onshore",
+        "Generation - Photovoltaics",
+        "Generation - Loss of Load",
+    ]
+    legend_elements = [PolyElement(color = parse(Makie.Colors.Colorant, color_map[label]))
+        for label in legend_order
+    ]
     Legend(fig[3:6, 5], legend_elements, legend_order, framevisible = true, labelsize = 10)
 
-    # Capacity bar charts: 4 rows × 4 zones
-    ax_gen_cap = [Axis(fig[7, i], title = "$(Zs[i]) Capacities") for i in 1:4]
-    ax_inj_cap = [Axis(fig[8, i]) for i in 1:4]
-    ax_ext_cap = [Axis(fig[9, i]) for i in 1:4]
-    ax_str_cap = [Axis(fig[10, i]) for i in 1:4]
-    ax_gen_cap[1].ylabel = "Gen [MW]"
-    ax_inj_cap[1].ylabel = "Inj [MW]"
-    ax_ext_cap[1].ylabel = "Ext [MW]"
-    ax_str_cap[1].ylabel = "Str [MWh]"
-    for r in 7:10; rowsize!(fig.layout, r, Fixed(100)); end
+    generation_capacity_axes = [Axis(fig[7, i], title = "$(zones_local[i]) Capacities") for i in 1:4]
+    injection_capacity_axes = [Axis(fig[8, i]) for i in 1:4]
+    extraction_capacity_axes = [Axis(fig[9, i]) for i in 1:4]
+    storage_capacity_axes = [Axis(fig[10, i]) for i in 1:4]
 
-    all_cap_axes = vcat(ax_gen_cap, ax_inj_cap, ax_ext_cap, ax_str_cap)
+    generation_capacity_axes[1].ylabel = "Gen [MW]"
+    injection_capacity_axes[1].ylabel = "Inj [MW]"
+    extraction_capacity_axes[1].ylabel = "Ext [MW]"
+    storage_capacity_axes[1].ylabel = "Str [MWh]"
 
-    zone_legend_elements = [LineElement(color = zone_colors[iz]) for iz in 1:4]
-    Legend(fig[2, 5], zone_legend_elements, Zs, framevisible = true, labelsize = 10)
-
-    sel_behavior = Observable("Perfect Competition")
-    sel_lp = Observable(true)
-    sel_year = Observable(2020)
-
-    on(dd_behavior.selection) do val
-        sel_behavior[] = val
-    end
-    on(dd_transport.selection) do val
-        sel_lp[] = val[2]
-    end
-    on(dd_year.selection) do val
-        sel_year[] = val
+    for row in 7:10
+        rowsize!(fig.layout, row, Fixed(100))
     end
 
-    function update_plot(behavior, lp, year)
-        r = all_results[behavior][year, lp]
-        prices = r["prices"]
-        gen_4d = r["generation"]   # [f, g, z, t]
-        inj_4d = r["injection"]    # [f, s, z, t]
-        ext_4d = r["extraction"]   # [f, s, z, t]
-        fl_4d = r["flow"]          # [f, z1, z2, t]
+    all_capacity_axes = vcat(
+        generation_capacity_axes,
+        injection_capacity_axes,
+        extraction_capacity_axes,
+        storage_capacity_axes,
+    )
 
-        for ax in [ax_price; ax_dispatch; all_cap_axes]
-            empty!(ax)
+    zone_legend_elements = [LineElement(color = zone_colors[zone_number]) for zone_number in 1:4]
+    Legend(fig[2, 5], zone_legend_elements, zones_local, framevisible = true, labelsize = 10)
+
+    selected_behavior = Observable("Perfect Competition")
+    selected_local_pricing = Observable(true)
+    selected_year = Observable(2020)
+
+    on(behavior_menu.selection) do value
+        selected_behavior[] = value
+    end
+
+    on(transport_menu.selection) do value
+        selected_local_pricing[] = value[2]
+    end
+
+    on(year_menu.selection) do value
+        selected_year[] = value
+    end
+
+    function update_plot(behavior, local_pricing, year)
+        result = all_results[behavior][year, local_pricing]
+
+        prices = result["prices"]
+        generation = result["generation"]
+        injection = result["injection"]  
+        extraction = result["extraction"]  
+        flow = result["flow"]
+
+        for axis in [price_axis; dispatch_axes; all_capacity_axes]
+            empty!(axis)
         end
 
-        # Prices
-        for (iz, z) in enumerate(Zs)
-            lines!(ax_price, collect(Ts), [prices[z, t] for t in Ts],
-                   color = zone_colors[iz])
+        for (zone_number, zone) in enumerate(zones_local)
+            lines!(price_axis, collect(hours), [prices[zone, hour] for hour in hours], color = zone_colors[zone_number],)
         end
 
-        # Dispatch per zone - aggregate over firms
-        for (iz, z) in enumerate(Zs)
-            xs = collect(Ts)
+        for (zone_number, zone) in enumerate(zones_local)
+            x_values = collect(hours)
 
-            pos_keys = String[]
-            pos_vals = Vector{Float64}[]
-            for g in Gs
-                push!(pos_keys, "Generation - $g")
-                push!(pos_vals, [sum(gen_4d[f, g, z, t] for f in Fs) for t in Ts])
-            end
-            for s in Ss
-                η = s == "Battery" ? 0.95 : 0.60
-                push!(pos_keys, "Storage Extraction - $s")
-                push!(pos_vals, [sum(ext_4d[f, s, z, t] for f in Fs) * η for t in Ts])
-            end
-            push!(pos_keys, "Imports")
-            push!(pos_vals, [sum(fl_4d[f, z2, z, t] for f in Fs, z2 in Zs if z2 != z) for t in Ts])
+            positive_labels = String[]
+            positive_series = Vector{Float64}[]
 
-            pos_matrix = hcat(pos_vals...)
-            colors_pos = [parse(Makie.Colors.Colorant, cmap[k]) for k in pos_keys]
-            cumsum_pos = cumsum(pos_matrix, dims = 2)
-
-            for j in size(cumsum_pos, 2):-1:1
-                upper = cumsum_pos[:, j]
-                lower = j > 1 ? cumsum_pos[:, j-1] : zeros(length(Ts))
-                band!(ax_dispatch[iz], xs, lower, upper, color = colors_pos[j])
+            for technology in generation_technologies_local
+                push!(positive_labels, "Generation - $technology")
+                push!(positive_series, [sum(generation[firm, technology, zone, hour] for firm in firms) for hour in hours],)
             end
 
-            neg_data = zeros(length(Ts))
-            for s in Ss
-                η = s == "Battery" ? 0.95 : 0.60
-                vals = [sum(inj_4d[f, s, z, t] for f in Fs) / η for t in Ts]
-                band!(ax_dispatch[iz], xs, neg_data .- vals, neg_data,
-                      color = parse(Makie.Colors.Colorant, cmap["Storage Injection - $s"]))
-                neg_data .-= vals
+            for storage_technology in storage_technologies_local
+                efficiency = storage_technology == "Battery" ? 0.95 : 0.60
+                push!(positive_labels, "Storage Extraction - $storage_technology")
+                push!(positive_series, [sum(extraction[firm, storage_technology, zone, hour] for firm in firms) * efficiency for hour in hours],)
             end
-            exports = [sum(fl_4d[f, z, z2, t] for f in Fs, z2 in Zs if z2 != z) for t in Ts]
-            band!(ax_dispatch[iz], xs, neg_data .- exports, neg_data,
-                  color = parse(Makie.Colors.Colorant, cmap["Exports"]))
-            hlines!(ax_dispatch[iz], [0], color = :black, linewidth = 0.5)
+
+            push!(positive_labels, "Imports")
+            push!(positive_series, [sum(flow[firm, other_zone, zone, hour] for firm in firms, other_zone in zones_local if other_zone != zone) for hour in hours],)
+
+            stacked_positive_values = hcat(positive_series...)
+            positive_colors = [
+                parse(Makie.Colors.Colorant, color_map[label])
+                for label in positive_labels
+            ]
+            cumulative_positive_values = cumsum(stacked_positive_values, dims = 2)
+
+            for layer in size(cumulative_positive_values, 2):-1:1
+                upper_boundary = cumulative_positive_values[:, layer]
+                lower_boundary = layer > 1 ? cumulative_positive_values[:, layer - 1] : zeros(length(hours))
+                band!(dispatch_axes[zone_number], x_values, lower_boundary, upper_boundary, color = positive_colors[layer],)
+            end
+
+
+            negative_stack = zeros(length(hours))
+            for storage_technology in storage_technologies_local
+                efficiency = storage_technology == "Battery" ? 0.95 : 0.60
+                charging_values = [
+                    sum(injection[firm, storage_technology, zone, hour] for firm in firms) / efficiency
+                    for hour in hours
+                ]
+                band!(dispatch_axes[zone_number], x_values, negative_stack .- charging_values, negative_stack, color = parse(Makie.Colors.Colorant, color_map["Storage Injection - $storage_technology"]),)
+                negative_stack .-= charging_values
+            end
+
+            export_values = [
+                sum(flow[firm, zone, other_zone, hour] for firm in firms, other_zone in zones_local if other_zone != zone)
+                for hour in hours
+            ]
+            band!(dispatch_axes[zone_number], x_values, negative_stack .- export_values, negative_stack, color = parse(Makie.Colors.Colorant, color_map["Exports"]),)
+            hlines!(dispatch_axes[zone_number], [0], color = :black, linewidth = 0.5)
         end
 
-        # Capacity bars by type
-        gen_cap = r["generation_capacity"]
-        stor_cap = r["storage_capacity"]
-        inj_cap_d = r["injection_capacity"]
-        ext_cap_d = r["extraction_capacity"]
 
-        gen_cols = [parse(Makie.Colors.Colorant, cmap["Generation - $g"]) for g in Gs]
-        stor_inj_cols = [parse(Makie.Colors.Colorant, cmap["Storage Injection - $s"]) for s in Ss]
-        stor_ext_cols = [parse(Makie.Colors.Colorant, cmap["Storage Extraction - $s"]) for s in Ss]
+        generation_capacity = result["generation_capacity"]
+        storage_capacity = result["storage_capacity"]
+        injection_capacity = result["injection_capacity"]
+        extraction_capacity = result["extraction_capacity"]
 
-        for (iz, z) in enumerate(Zs)
-            barplot!(ax_gen_cap[iz], 1:4, [sum(gen_cap[f, g, z] for f in Fs) for g in Gs], color = gen_cols)
-            ax_gen_cap[iz].xticks = (1:4, ["W.off", "W.on", "PV", "LoL"])
-            ax_gen_cap[iz].xticklabelrotation = π/4
+        generation_colors = [
+            parse(Makie.Colors.Colorant, color_map["Generation - $technology"])
+            for technology in generation_technologies_local
+        ]
+        injection_colors = [
+            parse(Makie.Colors.Colorant, color_map["Storage Injection - $storage_technology"])
+            for storage_technology in storage_technologies_local
+        ]
+        extraction_colors = [
+            parse(Makie.Colors.Colorant, color_map["Storage Extraction - $storage_technology"])
+            for storage_technology in storage_technologies_local
+        ]
 
-            barplot!(ax_inj_cap[iz], 1:2, [inj_cap_d[s, z] for s in Ss], color = stor_inj_cols)
-            ax_inj_cap[iz].xticks = (1:2, ["Bat", "H₂"])
+        for (zone_number, zone) in enumerate(zones_local)
+            barplot!(generation_capacity_axes[zone_number], 1:4, [sum(generation_capacity[firm, technology, zone] for firm in firms) for technology in generation_technologies_local], color = generation_colors,)
+            generation_capacity_axes[zone_number].xticks = (1:4, ["W.off", "W.on", "PV", "LoL"])
+            generation_capacity_axes[zone_number].xticklabelrotation = π / 4
 
-            barplot!(ax_ext_cap[iz], 1:2, [ext_cap_d[s, z] for s in Ss], color = stor_ext_cols)
-            ax_ext_cap[iz].xticks = (1:2, ["Bat", "H₂"])
+            barplot!(injection_capacity_axes[zone_number], 1:2, [injection_capacity[storage_technology, zone] for storage_technology in storage_technologies_local], color = injection_colors,)
+            injection_capacity_axes[zone_number].xticks = (1:2, ["Bat", "H₂"])
 
-            barplot!(ax_str_cap[iz], 1:2, [stor_cap[s, z] for s in Ss], color = stor_ext_cols)
-            ax_str_cap[iz].xticks = (1:2, ["Bat", "H₂"])
+            barplot!(extraction_capacity_axes[zone_number], 1:2, [extraction_capacity[storage_technology, zone] for storage_technology in storage_technologies_local],color = extraction_colors,)
+            extraction_capacity_axes[zone_number].xticks = (1:2, ["Bat", "H₂"])
+
+            barplot!(storage_capacity_axes[zone_number], 1:2, [storage_capacity[storage_technology, zone] for storage_technology in storage_technologies_local], color = extraction_colors,)
+            storage_capacity_axes[zone_number].xticks = (1:2, ["Bat", "H₂"])
         end
     end
 
-    onany(sel_behavior, sel_lp, sel_year) do behavior, lp, year
-        update_plot(behavior, lp, year)
+    onany(selected_behavior, selected_local_pricing, selected_year) do behavior, local_pricing, year
+        update_plot(behavior, local_pricing, year)
     end
 
     update_plot("Perfect Competition", true, 2020)
@@ -1278,18 +1389,11 @@ function get_stochastic_cost_minimization_results(
                 demand_by_zone_and_time = demand_by_year[weather_year]
 
                 for g in Gs, z in Zs, t in Ts
-                    JuMP.set_normalized_coefficient(
-                        generation_availability_constraint[g, z, t],
-                        generation_capacity[g, z].in,
-                        -generation_availability[(g, z, t)],
-                    )
+                    JuMP.set_normalized_coefficient(generation_availability_constraint[g, z, t], generation_capacity[g, z].in, -generation_availability[(g, z, t)],)
                 end
 
                 for z in Zs, t in Ts
-                    JuMP.set_normalized_rhs(
-                        market_clearing[z, t],
-                        demand_by_zone_and_time[(z, t)],
-                    )
+                    JuMP.set_normalized_rhs(market_clearing[z, t], demand_by_zone_and_time[(z, t)],)
                 end
             end
 
@@ -1307,9 +1411,7 @@ function get_stochastic_cost_minimization_results(
     stochastic_cost_minimization_results = []
 
     for weather_year in years
-        simulations = SDDP.simulate(
-            stochastic_model,
-            1,
+        simulations = SDDP.simulate(stochastic_model, 1,
             [
                 :generation,
                 :injection,
@@ -1330,17 +1432,9 @@ function get_stochastic_cost_minimization_results(
 
         demand_by_zone_and_time = demand_by_year[weather_year]
 
-        demand_array = JuMP.Containers.DenseAxisArray(
-            [demand_by_zone_and_time[(z, t)] for z in Zs, t in Ts],
-            Zs,
-            collect(Ts),
-        )
+        demand_array = JuMP.Containers.DenseAxisArray([demand_by_zone_and_time[(z, t)] for z in Zs, t in Ts], Zs,collect(Ts),)
 
-        prices_array = JuMP.Containers.DenseAxisArray(
-            zeros(length(Zs), length(Ts)),
-            Zs,
-            collect(Ts),
-        )
+        prices_array = JuMP.Containers.DenseAxisArray(zeros(length(Zs), length(Ts)), Zs, collect(Ts),)
 
         second_stage_result[:demand] = demand_array
         second_stage_result[:prices] = prices_array
@@ -1373,7 +1467,7 @@ function create_stochastic_cost_minimization_results_visualization(local_pricing
         "Generation - Photovoltaics"     => "#ffeb3b",
     )
 
-    plot_colors = Dict(k => parse(Makie.Colors.Colorant, v) for (k, v) in color_map)
+    plot_colors = Dict(label => parse(Makie.Colors.Colorant, hex_color) for (label, hex_color) in color_map)
     zone_colors = [colorant"#1565c0", colorant"#f9a825", colorant"#2e7d32", colorant"#8e24aa"]
 
     generation_technologies_local = generation_technologies
@@ -1382,27 +1476,27 @@ function create_stochastic_cost_minimization_results_visualization(local_pricing
     time_steps_local = time_steps
     x_values = collect(time_steps_local)
 
-    year_to_index = Dict{Int,Int}()
-    for (idx, item) in enumerate(stochastic_results)
-        year_to_index[item[2][:noise_term]] = idx
+    weather_year_to_result_index = Dict{Int,Int}()
+    for (result_index, result_entry) in enumerate(stochastic_results)
+        weather_year_to_result_index[result_entry[2][:noise_term]] = result_index
     end
-    available_years = sort(collect(keys(year_to_index)))
+    available_weather_years = sort(collect(keys(weather_year_to_result_index)))
 
     fig = Figure(size = (1600, 1200))
 
     pricing_label = local_pricing ? "Local Pricing" : "Network Pricing"
     Label(fig[1, 1], "Stochastic Cost Minimization ($pricing_label)", fontsize = 14, halign = :left)
-    dd_year = Menu(fig[1, 2], options = available_years)
+    weather_year_menu = Menu(fig[1, 2], options = available_weather_years)
 
-    ax_price = Axis(fig[2, 1:4], title = "Prices", ylabel = "Price [€/MWh]", xlabel = "Hour of Year")
-    ax_dispatch = [
+    price_axis = Axis(fig[2, 1:4], title = "Prices", ylabel = "Price [€/MWh]", xlabel = "Hour of Year")
+    dispatch_axes = [
         Axis(
-            fig[2 + i, 1:4],
-            title = "Dispatch $(zones_local[i])",
+            fig[2 + zone_number, 1:4],
+            title = "Dispatch $(zones_local[zone_number])",
             ylabel = "Generation [MW]",
             xlabel = "Hour of Year",
         )
-        for i in 1:4
+        for zone_number in 1:4
     ]
 
     legend_order = [
@@ -1417,36 +1511,36 @@ function create_stochastic_cost_minimization_results_visualization(local_pricing
         "Generation - Photovoltaics",
         "Generation - Loss of Load",
     ]
-    legend_elements = [PolyElement(color = plot_colors[k]) for k in legend_order]
+    legend_elements = [PolyElement(color = plot_colors[label]) for label in legend_order]
     Legend(fig[3:6, 5], legend_elements, legend_order, framevisible = true, labelsize = 10)
 
-    ax_generation_capacity = [Axis(fig[7, i], title = "$(zones_local[i]) Capacities") for i in 1:4]
-    ax_injection_capacity = [Axis(fig[8, i]) for i in 1:4]
-    ax_extraction_capacity = [Axis(fig[9, i]) for i in 1:4]
-    ax_storage_capacity = [Axis(fig[10, i]) for i in 1:4]
+    generation_capacity_axes = [Axis(fig[7, column], title = "$(zones_local[column]) Capacities") for column in 1:4]
+    injection_capacity_axes = [Axis(fig[8, column]) for column in 1:4]
+    extraction_capacity_axes = [Axis(fig[9, column]) for column in 1:4]
+    storage_capacity_axes = [Axis(fig[10, column]) for column in 1:4]
 
-    ax_generation_capacity[1].ylabel = "Gen [MW]"
-    ax_injection_capacity[1].ylabel = "Inj [MW]"
-    ax_extraction_capacity[1].ylabel = "Ext [MW]"
-    ax_storage_capacity[1].ylabel = "Str [MWh]"
+    generation_capacity_axes[1].ylabel = "Gen [MW]"
+    injection_capacity_axes[1].ylabel = "Inj [MW]"
+    extraction_capacity_axes[1].ylabel = "Ext [MW]"
+    storage_capacity_axes[1].ylabel = "Str [MWh]"
 
     for row in 7:10
         rowsize!(fig.layout, row, Fixed(100))
     end
 
     all_capacity_axes = vcat(
-        ax_generation_capacity,
-        ax_injection_capacity,
-        ax_extraction_capacity,
-        ax_storage_capacity,
+        generation_capacity_axes,
+        injection_capacity_axes,
+        extraction_capacity_axes,
+        storage_capacity_axes,
     )
 
-    zone_legend_elements = [LineElement(color = zone_colors[iz]) for iz in 1:4]
+    zone_legend_elements = [LineElement(color = zone_colors[zone_number]) for zone_number in 1:4]
     Legend(fig[2, 5], zone_legend_elements, zones_local, framevisible = true, labelsize = 10)
 
     function update_plot(weather_year)
-        idx = year_to_index[weather_year]
-        result = stochastic_results[idx][2]
+        result_index = weather_year_to_result_index[weather_year]
+        result = stochastic_results[result_index][2]
 
         prices = result[:prices]
         generation = result[:generation]
@@ -1454,76 +1548,66 @@ function create_stochastic_cost_minimization_results_visualization(local_pricing
         extraction = result[:extraction]
         flow = result[:flow]
 
-        for ax in [ax_price; ax_dispatch; all_capacity_axes]
-            empty!(ax)
+        for axis in [price_axis; dispatch_axes; all_capacity_axes]
+            empty!(axis)
         end
 
-        for (zone_index, zone) in enumerate(zones_local)
+        for (zone_number, zone) in enumerate(zones_local)
             lines!(
-                ax_price,
+                price_axis,
                 x_values,
-                [prices[zone, t] for t in time_steps_local],
-                color = zone_colors[zone_index],
+                [prices[zone, time_step] for time_step in time_steps_local],
+                color = zone_colors[zone_number],
             )
         end
 
-        for (zone_index, zone) in enumerate(zones_local)
-            positive_keys = String[]
-            positive_values = Vector{Float64}[]
+        for (zone_number, zone) in enumerate(zones_local)
+            positive_labels = String[]
+            positive_series = Vector{Float64}[]
 
             for technology in generation_technologies_local
-                push!(positive_keys, "Generation - $technology")
-                push!(positive_values, [generation[technology, zone, t] for t in time_steps_local])
+                push!(positive_labels, "Generation - $technology")
+                push!(positive_series, [generation[technology, zone, time_step] for time_step in time_steps_local])
             end
 
             for storage_technology in storage_technologies_local
                 efficiency = storage_technology == "Battery" ? 0.95 : 0.60
-                push!(positive_keys, "Storage Extraction - $storage_technology")
+                push!(positive_labels, "Storage Extraction - $storage_technology")
                 push!(
-                    positive_values,
-                    [extraction[storage_technology, zone, t] * efficiency for t in time_steps_local],
+                    positive_series,
+                    [extraction[storage_technology, zone, time_step] * efficiency for time_step in time_steps_local],
                 )
             end
 
-            push!(positive_keys, "Imports")
+            push!(positive_labels, "Imports")
             push!(
-                positive_values,
-                [sum(flow[z2, zone, t] for z2 in zones_local if z2 != zone) for t in time_steps_local],
+                positive_series,
+                [sum(flow[other_zone, zone, time_step] for other_zone in zones_local if other_zone != zone) for time_step in time_steps_local],
             )
 
-            positive_matrix = hcat(positive_values...)
-            positive_colors = [plot_colors[k] for k in positive_keys]
+            positive_matrix = hcat(positive_series...)
+            positive_colors = [plot_colors[label] for label in positive_labels]
             cumulative_positive = cumsum(positive_matrix, dims = 2)
 
-            for j in size(cumulative_positive, 2):-1:1
-                upper = cumulative_positive[:, j]
-                lower = j > 1 ? cumulative_positive[:, j - 1] : zeros(length(time_steps_local))
-                band!(ax_dispatch[zone_index], x_values, lower, upper, color = positive_colors[j])
+            for layer_index in size(cumulative_positive, 2):-1:1
+                upper_boundary = cumulative_positive[:, layer_index]
+                lower_boundary = layer_index > 1 ? cumulative_positive[:, layer_index - 1] : zeros(length(time_steps_local))
+                band!(dispatch_axes[zone_number], x_values, lower_boundary, upper_boundary, color = positive_colors[layer_index])
             end
 
-            negative_data = zeros(length(time_steps_local))
+            negative_stack = zeros(length(time_steps_local))
             for storage_technology in storage_technologies_local
                 efficiency = storage_technology == "Battery" ? 0.95 : 0.60
-                values = [injection[storage_technology, zone, t] / efficiency for t in time_steps_local]
-                band!(
-                    ax_dispatch[zone_index],
-                    x_values,
-                    negative_data .- values,
-                    negative_data,
-                    color = plot_colors["Storage Injection - $storage_technology"],
-                )
-                negative_data .-= values
+                charging_values = [injection[storage_technology, zone, time_step] / efficiency for time_step in time_steps_local]
+
+                band!(dispatch_axes[zone_number], x_values, negative_stack .- charging_values, negative_stack, color = plot_colors["Storage Injection - $storage_technology"],)
+                negative_stack .-= charging_values
             end
 
-            exports = [sum(flow[zone, z2, t] for z2 in zones_local if z2 != zone) for t in time_steps_local]
-            band!(
-                ax_dispatch[zone_index],
-                x_values,
-                negative_data .- exports,
-                negative_data,
-                color = plot_colors["Exports"],
-            )
-            hlines!(ax_dispatch[zone_index], [0], color = :black, linewidth = 0.5)
+            export_values = [sum(flow[zone, other_zone, time_step] for other_zone in zones_local if other_zone != zone) for time_step in time_steps_local]
+
+            band!(dispatch_axes[zone_number], x_values, negative_stack .- export_values, negative_stack, color = plot_colors["Exports"],)
+            hlines!(dispatch_axes[zone_number], [0], color = :black, linewidth = 0.5)
         end
 
         generation_capacity = result[:generation_capacity]
@@ -1531,43 +1615,43 @@ function create_stochastic_cost_minimization_results_visualization(local_pricing
         injection_capacity = result[:injection_capacity]
         extraction_capacity = result[:extraction_capacity]
 
-        generation_colors = [plot_colors["Generation - $g"] for g in generation_technologies_local]
-        injection_colors = [plot_colors["Storage Injection - $s"] for s in storage_technologies_local]
-        extraction_colors = [plot_colors["Storage Extraction - $s"] for s in storage_technologies_local]
+        generation_colors = [plot_colors["Generation - $technology"] for technology in generation_technologies_local]
+        injection_colors = [plot_colors["Storage Injection - $storage_technology"] for storage_technology in storage_technologies_local]
+        extraction_colors = [plot_colors["Storage Extraction - $storage_technology"] for storage_technology in storage_technologies_local]
 
-        for (zone_index, zone) in enumerate(zones_local)
-            generation_values = [generation_capacity[g, zone].out for g in generation_technologies_local]
-            barplot!(ax_generation_capacity[zone_index], 1:4, generation_values, color = generation_colors)
-            ax_generation_capacity[zone_index].xticks = (1:4, ["W.off", "W.on", "PV", "LoL"])
-            ax_generation_capacity[zone_index].xticklabelrotation = π / 4
+        for (zone_number, zone) in enumerate(zones_local)
+            generation_values = [generation_capacity[technology, zone].out for technology in generation_technologies_local]
+            barplot!(generation_capacity_axes[zone_number], 1:4, generation_values, color = generation_colors)
+            generation_capacity_axes[zone_number].xticks = (1:4, ["W.off", "W.on", "PV", "LoL"])
+            generation_capacity_axes[zone_number].xticklabelrotation = π / 4
 
-            injection_values = [injection_capacity[s, zone].out for s in storage_technologies_local]
-            barplot!(ax_injection_capacity[zone_index], 1:2, injection_values, color = injection_colors)
-            ax_injection_capacity[zone_index].xticks = (1:2, ["Bat", "H₂"])
+            injection_values = [injection_capacity[storage_technology, zone].out for storage_technology in storage_technologies_local]
+            barplot!(injection_capacity_axes[zone_number], 1:2, injection_values, color = injection_colors)
+            injection_capacity_axes[zone_number].xticks = (1:2, ["Bat", "H₂"])
             if maximum(injection_values) == 0
-                ylims!(ax_injection_capacity[zone_index], 0, 1)
+                ylims!(injection_capacity_axes[zone_number], 0, 1)
             end
 
-            extraction_values = [extraction_capacity[s, zone].out for s in storage_technologies_local]
-            barplot!(ax_extraction_capacity[zone_index], 1:2, extraction_values, color = extraction_colors)
-            ax_extraction_capacity[zone_index].xticks = (1:2, ["Bat", "H₂"])
+            extraction_values = [extraction_capacity[storage_technology, zone].out for storage_technology in storage_technologies_local]
+            barplot!(extraction_capacity_axes[zone_number], 1:2, extraction_values, color = extraction_colors)
+            extraction_capacity_axes[zone_number].xticks = (1:2, ["Bat", "H₂"])
             if maximum(extraction_values) == 0
-                ylims!(ax_extraction_capacity[zone_index], 0, 1)
+                ylims!(extraction_capacity_axes[zone_number], 0, 1)
             end
 
-            storage_values = [storage_capacity[s, zone].out for s in storage_technologies_local]
-            barplot!(ax_storage_capacity[zone_index], 1:2, storage_values, color = extraction_colors)
-            ax_storage_capacity[zone_index].xticks = (1:2, ["Bat", "H₂"])
+            storage_values = [storage_capacity[storage_technology, zone].out for storage_technology in storage_technologies_local]
+            barplot!(storage_capacity_axes[zone_number], 1:2, storage_values, color = extraction_colors)
+            storage_capacity_axes[zone_number].xticks = (1:2, ["Bat", "H₂"])
             if maximum(storage_values) == 0
-                ylims!(ax_storage_capacity[zone_index], 0, 1)
+                ylims!(storage_capacity_axes[zone_number], 0, 1)
             end
         end
     end
 
-    on(dd_year.selection) do weather_year
+    on(weather_year_menu.selection) do weather_year
         update_plot(weather_year)
     end
 
-    update_plot(available_years[1])
+    update_plot(available_weather_years[1])
     display(fig)
 end
