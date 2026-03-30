@@ -271,76 +271,169 @@ function create_data_inspection(;
 end
 
 
+# Some Functions
+# --------------
+
+const generation_technologies = ["Wind offshore", "Wind onshore", "Photovoltaics", "Loss of Load"]
+const storage_technologies = ["Battery", "Hydrogen"]
+const zones = ["50Hertz", "Amprion", "TenneT", "TransnetBW"]
+const time_steps = 1:8760
+const weather_years = 2020:2025
+
+const previous_time_step = Dict(t => t == 1 ? 8760 : t - 1 for t in time_steps)
+
+annuity(discount_rate, lifetime_years) = discount_rate / (1 - (1 + discount_rate)^(-lifetime_years))
+
+function get_model_parameters()
+    discount_rate = 0.05
+
+    generation_lifetime_years = Dict(
+        "Wind offshore" => 30,
+        "Wind onshore" => 30,
+        "Photovoltaics" => 30,
+        "Loss of Load" => 30,
+    )
+
+    storage_lifetime_years = Dict(
+        "Battery" => 15,
+        "Hydrogen" => 30,
+    )
+
+    generation_investment_cost_per_mw = Dict(
+        "Wind offshore" => 2.8e6,
+        "Wind onshore" => 1.2e6,
+        "Photovoltaics" => 0.6e6,
+        "Loss of Load" => 1.0,
+    )
+
+    generation_marginal_cost_per_mwh = Dict(
+        "Wind offshore" => 1.0,
+        "Wind onshore" => 1.0,
+        "Photovoltaics" => 1.0,
+        "Loss of Load" => 1000.0,
+    )
+
+    storage_energy_investment_cost_per_mwh = Dict(
+        "Battery" => 3e5,
+        "Hydrogen" => 3e3,
+    )
+
+    storage_injection_investment_cost_per_mw = Dict(
+        "Battery" => 1.0,
+        "Hydrogen" => 1.4e6,
+    )
+
+    storage_extraction_investment_cost_per_mw = Dict(
+        "Battery" => 1.0,
+        "Hydrogen" => 6e5,
+    )
+
+    charging_efficiency = Dict(
+        "Battery" => 0.95,
+        "Hydrogen" => 0.60,
+    )
+
+    discharging_efficiency = Dict(
+        "Battery" => 0.95,
+        "Hydrogen" => 0.60,
+    )
+
+    transmission_flow_cost_per_mwh = 1.0
+
+    generation_annuity_factor = Dict(
+        technology => annuity(discount_rate, generation_lifetime_years[technology])
+        for technology in generation_technologies
+    )
+
+    storage_annuity_factor = Dict(
+        technology => annuity(discount_rate, storage_lifetime_years[technology])
+        for technology in storage_technologies
+    )
+
+    return (
+        discount_rate = discount_rate,
+        generation_lifetime_years = generation_lifetime_years,
+        storage_lifetime_years = storage_lifetime_years,
+        generation_investment_cost_per_mw = generation_investment_cost_per_mw,
+        generation_marginal_cost_per_mwh = generation_marginal_cost_per_mwh,
+        storage_energy_investment_cost_per_mwh = storage_energy_investment_cost_per_mwh,
+        storage_injection_investment_cost_per_mw = storage_injection_investment_cost_per_mw,
+        storage_extraction_investment_cost_per_mw = storage_extraction_investment_cost_per_mw,
+        charging_efficiency = charging_efficiency,
+        discharging_efficiency = discharging_efficiency,
+        transmission_flow_cost_per_mwh = transmission_flow_cost_per_mwh,
+        generation_annuity_factor = generation_annuity_factor,
+        storage_annuity_factor = storage_annuity_factor,
+    )
+end
+
+function prepare_yearly_model_inputs(data)
+    year_cache = Dict{Int, NamedTuple}()
+
+    for year in weather_years
+        year_data = filter(row -> row.Year == year, data)
+
+        generation_availability = Dict{Tuple{String,String,Int},Float64}()
+        demand_by_zone_and_time = Dict{Tuple{String,Int},Float64}()
+        inverse_demand_intercept = Dict{Tuple{String,Int},Float64}()
+        inverse_demand_slope = Dict{Tuple{String,Int},Float64}()
+
+        for row in eachrow(year_data)
+            zone = row.Area
+            time = row.hour_of_year
+
+            for technology in ["Wind offshore", "Wind onshore", "Photovoltaics"]
+                generation_availability[(technology, zone, time)] =
+                    row["$(technology) availability"]
+            end
+
+            generation_availability[("Loss of Load", zone, time)] = 1.0
+            demand_by_zone_and_time[(zone, time)] = row["grid load [MWh]"]
+            inverse_demand_intercept[(zone, time)] = row.a
+            inverse_demand_slope[(zone, time)] = row.b
+        end
+
+        year_cache[year] = (
+            year_data = year_data,
+            generation_availability = generation_availability,
+            demand_by_zone_and_time = demand_by_zone_and_time,
+            inverse_demand_intercept = inverse_demand_intercept,
+            inverse_demand_slope = inverse_demand_slope,
+        )
+    end
+
+    return year_cache
+end
+
 # PT.2.3 – Cost Optimization Model
 # --------------------------------
 
 function get_deterministic_cost_minimization_results(optimizer)
     @load joinpath(@__DIR__, "results", "data.jld2") data
 
-    # Index sets
-    Gs = ["Wind offshore", "Wind onshore", "Photovoltaics", "Loss of Load"]
-    Ss = ["Battery", "Hydrogen"]
-    Zs = ["50Hertz", "Amprion", "TenneT", "TransnetBW"]
-    Ts = 1:8760
-    previous = Dict(t => t == 1 ? 8760 : t - 1 for t in Ts)
+    Gs = generation_technologies
+    Ss = storage_technologies
+    Zs = zones
+    Ts = time_steps
+    previous = previous_time_step
+    years = weather_years
 
-    # Cost parameters
-    discount_rate = 0.05
-    lifetime_gen = Dict("Wind offshore" => 30, "Wind onshore" => 30,
-                        "Photovoltaics" => 30, "Loss of Load" => 30)
-    lifetime_storage = Dict("Battery" => 15, "Hydrogen" => 30)
-
-    annuity(r, n) = r / (1 - (1 + r)^(-n))
-
-    capex_gen = Dict("Wind offshore" => 2.8e6, "Wind onshore" => 1.2e6,
-                     "Photovoltaics" => 0.6e6, "Loss of Load" => 1.0)
-    mc_gen = Dict("Wind offshore" => 1.0, "Wind onshore" => 1.0,
-                  "Photovoltaics" => 1.0, "Loss of Load" => 1000.0)
-
-    capex_storage_energy = Dict("Battery" => 3e5, "Hydrogen" => 3e3)
-    capex_injection = Dict("Battery" => 1.0, "Hydrogen" => 1.4e6)
-    capex_extraction = Dict("Battery" => 1.0, "Hydrogen" => 6e5)
-    η_inj = Dict("Battery" => 0.95, "Hydrogen" => 0.60)
-    η_ext = Dict("Battery" => 0.95, "Hydrogen" => 0.60)
-
-    flow_cost = 1.0
-
-    # Annuity factors
-    af_gen = Dict(g => annuity(discount_rate, lifetime_gen[g]) for g in Gs)
-    af_storage = Dict(s => annuity(discount_rate, lifetime_storage[s]) for s in Ss)
-
-    # Build availability and demand lookups per year
-    years = 2020:2025
+    model_parameters = get_model_parameters()
+    yearly_model_inputs = prepare_yearly_model_inputs(data)
 
     deterministic_cost_minimization_results = JuMP.Containers.DenseAxisArray(
         Array{Any}(undef, length(years), 2), collect(years), [true, false]
     )
 
     for year in years
-        year_data = filter(row -> row.Year == year, data)
-
-        # Availability: for each (g, z, t)
-        avail = Dict{Tuple{String,String,Int},Float64}()
-        for row in eachrow(year_data)
-            z = row.Area
-            t = row.hour_of_year
-            for g in ["Wind offshore", "Wind onshore", "Photovoltaics"]
-                avail[(g, z, t)] = row["$(g) availability"]
-            end
-            avail[("Loss of Load", z, t)] = 1.0
-        end
-
-        # Demand: for each (z, t)
-        demand_val = Dict{Tuple{String,Int},Float64}()
-        for row in eachrow(year_data)
-            demand_val[(row.Area, row.hour_of_year)] = row["grid load [MWh]"]
-        end
+        year_data = yearly_model_inputs[year]
+        generation_availability = year_data.generation_availability
+        demand_by_zone_and_time = year_data.demand_by_zone_and_time
 
         for local_pricing in [true, false]
             model = Model(optimizer)
             set_silent(model)
 
-            # Variables
             @variable(model, generation_capacity[g in Gs, z in Zs] >= 0)
             @variable(model, storage_capacity[s in Ss, z in Zs] >= 0)
             @variable(model, injection_capacity[s in Ss, z in Zs] >= 0)
@@ -351,81 +444,61 @@ function get_deterministic_cost_minimization_results(optimizer)
             @variable(model, storage_level[s in Ss, z in Zs, t in Ts] >= 0)
             @variable(model, flow[z1 in Zs, z2 in Zs, t in Ts] >= 0)
 
-            # Objective
             @objective(model, Min,
-                sum(af_gen[g] * capex_gen[g] * generation_capacity[g, z]
-                    for g in Gs, z in Zs) +
-                sum(af_storage[s] * capex_storage_energy[s] * storage_capacity[s, z]
-                    for s in Ss, z in Zs) +
-                sum(af_storage[s] * capex_injection[s] * injection_capacity[s, z]
-                    for s in Ss, z in Zs) +
-                sum(af_storage[s] * capex_extraction[s] * extraction_capacity[s, z]
-                    for s in Ss, z in Zs) +
-                sum(mc_gen[g] * generation[g, z, t]
-                    for g in Gs, z in Zs, t in Ts) +
-                sum(flow_cost * flow[z1, z2, t]
-                    for z1 in Zs, z2 in Zs, t in Ts if z1 != z2)
+                sum(model_parameters.generation_annuity_factor[g] * model_parameters.generation_investment_cost_per_mw[g] * generation_capacity[g, z] for g in Gs, z in Zs) +
+                sum(model_parameters.storage_annuity_factor[s] * model_parameters.storage_energy_investment_cost_per_mwh[s] * storage_capacity[s, z] for s in Ss, z in Zs) +
+                sum(model_parameters.storage_annuity_factor[s] * model_parameters.storage_injection_investment_cost_per_mw[s] * injection_capacity[s, z] for s in Ss, z in Zs) +
+                sum(model_parameters.storage_annuity_factor[s] * model_parameters.storage_extraction_investment_cost_per_mw[s] * extraction_capacity[s, z] for s in Ss, z in Zs) +
+                sum(model_parameters.generation_marginal_cost_per_mwh[g] * generation[g, z, t] for g in Gs, z in Zs, t in Ts) +
+                sum(model_parameters.transmission_flow_cost_per_mwh * flow[z1, z2, t] for z1 in Zs, z2 in Zs, t in Ts if z1 != z2)
             )
 
-            # Constraints
-            # 1. Generation availability
-            @constraint(model, gen_avail[g in Gs, z in Zs, t in Ts],
-                generation[g, z, t] <= avail[(g, z, t)] * generation_capacity[g, z])
+            @constraint(model, generation_availability_constraint[g in Gs, z in Zs, t in Ts],
+                generation[g, z, t] <= generation_availability[(g, z, t)] * generation_capacity[g, z])
 
-            # 2. Injection power limit
-            @constraint(model, inj_limit[s in Ss, z in Zs, t in Ts],
+            @constraint(model, injection_capacity_constraint[s in Ss, z in Zs, t in Ts],
                 injection[s, z, t] <= injection_capacity[s, z])
 
-            # 3. Extraction power limit
-            @constraint(model, ext_limit[s in Ss, z in Zs, t in Ts],
+            @constraint(model, extraction_capacity_constraint[s in Ss, z in Zs, t in Ts],
                 extraction[s, z, t] <= extraction_capacity[s, z])
 
-            # 4. Storage energy capacity limit
-            @constraint(model, stor_limit[s in Ss, z in Zs, t in Ts],
+            @constraint(model, storage_capacity_constraint[s in Ss, z in Zs, t in Ts],
                 storage_level[s, z, t] <= storage_capacity[s, z])
 
-            # 5. Storage dynamics
-            @constraint(model, stor_dyn[s in Ss, z in Zs, t in Ts],
-                storage_level[s, z, t] == storage_level[s, z, previous[t]] +
-                    injection[s, z, t] - extraction[s, z, t])
+            @constraint(model, storage_balance_constraint[s in Ss, z in Zs, t in Ts],
+                storage_level[s, z, t] == storage_level[s, z, previous[t]] + injection[s, z, t] - extraction[s, z, t])
 
-            # 6. Market clearing (zonal energy balance)
             @constraint(model, market_clearing[z in Zs, t in Ts],
                 sum(generation[g, z, t] for g in Gs) +
-                sum(extraction[s, z, t] * η_ext[s] for s in Ss) +
+                sum(extraction[s, z, t] * model_parameters.discharging_efficiency[s] for s in Ss) +
                 sum(flow[z2, z, t] for z2 in Zs if z2 != z)
                 >=
-                demand_val[(z, t)] +
-                sum(injection[s, z, t] / η_inj[s] for s in Ss) +
+                demand_by_zone_and_time[(z, t)] +
+                sum(injection[s, z, t] / model_parameters.charging_efficiency[s] for s in Ss) +
                 sum(flow[z, z2, t] for z2 in Zs if z2 != z)
             )
 
-            # 7. Flow constraints
             if local_pricing
                 @constraint(model, no_flow[z1 in Zs, z2 in Zs, t in Ts; z1 != z2],
                     flow[z1, z2, t] == 0)
             else
-                @constraint(model, flow_cap[z1 in Zs, z2 in Zs, t in Ts; z1 != z2],
+                @constraint(model, flow_capacity_constraint[z1 in Zs, z2 in Zs, t in Ts; z1 != z2],
                     flow[z1, z2, t] <= 100_000)
             end
 
-            # No self-flow
             @constraint(model, no_self_flow[z in Zs, t in Ts],
                 flow[z, z, t] == 0)
 
             optimize!(model)
             @assert JuMP.termination_status(model) == MOI.OPTIMAL
 
-            # Extract results
             prices = JuMP.Containers.DenseAxisArray(
                 [dual(market_clearing[z, t]) for z in Zs, t in Ts],
-                Zs, collect(Ts)
-            )
+                Zs, collect(Ts))
 
             demand_array = JuMP.Containers.DenseAxisArray(
-                [demand_val[(z, t)] for z in Zs, t in Ts],
-                Zs, collect(Ts)
-            )
+                [demand_by_zone_and_time[(z, t)] for z in Zs, t in Ts],
+                Zs, collect(Ts))
 
             deterministic_cost_minimization_results[year, local_pricing] = Dict(
                 "extraction"          => value.(extraction),
@@ -454,9 +527,7 @@ end
 
 function create_deterministic_cost_minimization_results_visualization()
     results_path = joinpath(@__DIR__, "results", "deterministic_cost_minimization_results.jld2")
-    test_path = joinpath(@__DIR__, "test_data", "deterministic_cost_minimization_results.jld2")
-    path = isfile(results_path) ? results_path : test_path
-    results = load(path, "deterministic_cost_minimization_results")
+    results = load(results_path, "deterministic_cost_minimization_results")
 
     cmap = Dict(
         "Storage Injection - Battery"    => "#ae393f",
@@ -502,7 +573,6 @@ function create_deterministic_cost_minimization_results_visualization()
     legend_elements = [PolyElement(color = parse(Makie.Colors.Colorant, cmap[k])) for k in legend_order]
     Legend(fig[3:6, 5], legend_elements, legend_order, framevisible = true, labelsize = 10)
 
-    # Capacity bar charts: 4 rows (Gen, Inj, Ext, Str) × 4 zones
     ax_gen_cap = [Axis(fig[7, i], title = "$(Zs[i]) Capacities") for i in 1:4]
     ax_inj_cap = [Axis(fig[8, i]) for i in 1:4]
     ax_ext_cap = [Axis(fig[9, i]) for i in 1:4]
@@ -514,6 +584,9 @@ function create_deterministic_cost_minimization_results_visualization()
     for r in 7:10; rowsize!(fig.layout, r, Fixed(100)); end
 
     all_cap_axes = vcat(ax_gen_cap, ax_inj_cap, ax_ext_cap, ax_str_cap)
+
+    zone_legend_elements = [LineElement(color = zone_colors[iz]) for iz in 1:4]
+    Legend(fig[2, 5], zone_legend_elements, Zs, framevisible = true, labelsize = 10)
 
     sel_year = Observable(2020)
     sel_lp = Observable(true)
@@ -541,9 +614,8 @@ function create_deterministic_cost_minimization_results_visualization()
         # Prices
         for (iz, z) in enumerate(Zs)
             lines!(ax_price, collect(Ts), [prices[z, t] for t in Ts],
-                   color = zone_colors[iz], label = z)
+                   color = zone_colors[iz])
         end
-        axislegend(ax_price, position = :rt, labelsize = 10)
 
         # Dispatch per zone
         for (iz, z) in enumerate(Zs)
@@ -580,6 +652,7 @@ function create_deterministic_cost_minimization_results_visualization()
             exports = [sum(fl[z, z2, t] for z2 in Zs if z2 != z) for t in Ts]
             band!(ax_dispatch[iz], xs, neg_data .- exports, neg_data,
                   color = parse(Makie.Colors.Colorant, cmap["Exports"]))
+            hlines!(ax_dispatch[iz], [0], color = :black, linewidth = 0.5)
         end
 
         # Capacity bar charts by type
@@ -623,65 +696,30 @@ end
 function get_deterministic_welfare_maximization_results(optimizer)
     @load joinpath(@__DIR__, "results", "data.jld2") data
 
-    Gs = ["Wind offshore", "Wind onshore", "Photovoltaics", "Loss of Load"]
-    Ss = ["Battery", "Hydrogen"]
-    Zs = ["50Hertz", "Amprion", "TenneT", "TransnetBW"]
-    Fs = Zs  # Each firm = TSO zone
-    Ts = 1:8760
-    previous = Dict(t => t == 1 ? 8760 : t - 1 for t in Ts)
+    Gs = generation_technologies
+    Ss = storage_technologies
+    Zs = zones
+    Fs = zones
+    Ts = time_steps
+    years = weather_years
+    previous = previous_time_step
 
-    discount_rate = 0.05
-    annuity(r, n) = r / (1 - (1 + r)^(-n))
-
-    lifetime_gen = Dict("Wind offshore" => 30, "Wind onshore" => 30,
-                        "Photovoltaics" => 30, "Loss of Load" => 30)
-    lifetime_storage = Dict("Battery" => 15, "Hydrogen" => 30)
-
-    capex_gen = Dict("Wind offshore" => 2.8e6, "Wind onshore" => 1.2e6,
-                     "Photovoltaics" => 0.6e6, "Loss of Load" => 1.0)
-    mc_gen = Dict("Wind offshore" => 1.0, "Wind onshore" => 1.0,
-                  "Photovoltaics" => 1.0, "Loss of Load" => 1000.0)
-
-    capex_storage_energy = Dict("Battery" => 3e5, "Hydrogen" => 3e3)
-    capex_injection = Dict("Battery" => 1.0, "Hydrogen" => 1.4e6)
-    capex_extraction = Dict("Battery" => 1.0, "Hydrogen" => 6e5)
-    η_inj = Dict("Battery" => 0.95, "Hydrogen" => 0.60)
-    η_ext = Dict("Battery" => 0.95, "Hydrogen" => 0.60)
-
-    flow_cost = 1.0
-
-    af_gen = Dict(g => annuity(discount_rate, lifetime_gen[g]) for g in Gs)
-    af_storage = Dict(s => annuity(discount_rate, lifetime_storage[s]) for s in Ss)
-
-    years = 2020:2025
+    model_parameters = get_model_parameters()
+    yearly_model_inputs = prepare_yearly_model_inputs(data)
 
     deterministic_welfare_maximization_results = JuMP.Containers.DenseAxisArray(
-        Array{Any}(undef, length(years), 2), collect(years), [true, false]
-    )
+        Array{Any}(undef, length(years), 2), collect(years), [true, false])
 
     for year in years
-        year_data = filter(row -> row.Year == year, data)
-
-        avail = Dict{Tuple{String,String,Int},Float64}()
-        a_param = Dict{Tuple{String,Int},Float64}()
-        b_param = Dict{Tuple{String,Int},Float64}()
-
-        for row in eachrow(year_data)
-            z = row.Area
-            t = row.hour_of_year
-            for g in ["Wind offshore", "Wind onshore", "Photovoltaics"]
-                avail[(g, z, t)] = row["$(g) availability"]
-            end
-            avail[("Loss of Load", z, t)] = 1.0
-            a_param[(z, t)] = row.a
-            b_param[(z, t)] = row.b
-        end
+        year_data = yearly_model_inputs[year]
+        generation_availability = year_data.generation_availability
+        inverse_demand_intercept = year_data.inverse_demand_intercept
+        inverse_demand_slope = year_data.inverse_demand_slope
 
         for local_pricing in [true, false]
             model = Model(optimizer)
             set_silent(model)
 
-            # Variables with firm dimension
             @variable(model, generation_capacity[f in Fs, g in Gs, z in Zs] >= 0)
             @variable(model, storage_capacity[s in Ss, z in Zs] >= 0)
             @variable(model, injection_capacity[s in Ss, z in Zs] >= 0)
@@ -693,7 +731,6 @@ function get_deterministic_welfare_maximization_results(optimizer)
             @variable(model, flow[f in Fs, z1 in Zs, z2 in Zs, t in Ts] >= 0)
             @variable(model, Q[f in Fs, z in Zs, t in Ts] >= 0)
 
-            # Firms can only operate in their own zone
             for f in Fs, g in Gs, z in Zs
                 if f != z
                     fix(generation_capacity[f, g, z], 0.0; force = true)
@@ -702,6 +739,7 @@ function get_deterministic_welfare_maximization_results(optimizer)
                     end
                 end
             end
+
             for f in Fs, s in Ss, z in Zs
                 if f != z
                     for t in Ts
@@ -711,6 +749,7 @@ function get_deterministic_welfare_maximization_results(optimizer)
                     end
                 end
             end
+
             for f in Fs, z1 in Zs, z2 in Zs
                 if f != z1
                     for t in Ts
@@ -719,92 +758,74 @@ function get_deterministic_welfare_maximization_results(optimizer)
                 end
             end
 
-            # Objective: maximize welfare
-            # Welfare = consumer surplus integral - costs
-            # ∫₀^Q p(q)dq = a*Q + 0.5*b*Q²  (note b < 0, so this is concave)
-            # Total Q in zone z at time t = sum_f Q[f,z,t]
-            # We need: Σ_{z,t} [a[z,t]*Q_total + 0.5*b[z,t]*Q_total²] - costs
-            # Q_total = Σ_f Q[f,z,t]
-            # a*Q_total + 0.5*b*Q_total² = a*Σ_f Q + 0.5*b*(Σ_f Q)²
-            #   = Σ_f a*Q[f] + 0.5*b*Σ_f Q[f]² + 0.5*b*Σ_{f≠f'} Q[f]*Q[f']
-            #   = Σ_f [a*Q[f] + 0.5*b*Q[f]²] + b*Σ_{f<f'} Q[f]*Q[f']
-
             @objective(model, Max,
-                sum(a_param[(z, t)] * Q[f, z, t] + 0.5 * b_param[(z, t)] * Q[f, z, t]^2
+                sum(inverse_demand_intercept[(z, t)] * Q[f, z, t] + 0.5 * inverse_demand_slope[(z, t)] * Q[f, z, t]^2
                     for f in Fs, z in Zs, t in Ts) +
-                sum(b_param[(z, t)] * Q[f1, z, t] * Q[f2, z, t]
+                sum(inverse_demand_slope[(z, t)] * Q[f1, z, t] * Q[f2, z, t]
                     for f1 in Fs, f2 in Fs, z in Zs, t in Ts if f1 < f2) -
-                sum(af_gen[g] * capex_gen[g] * generation_capacity[f, g, z]
+                sum(model_parameters.generation_annuity_factor[g] * model_parameters.generation_investment_cost_per_mw[g] * generation_capacity[f, g, z]
                     for f in Fs, g in Gs, z in Zs) -
-                sum(af_storage[s] * capex_storage_energy[s] * storage_capacity[s, z]
+                sum(model_parameters.storage_annuity_factor[s] * model_parameters.storage_energy_investment_cost_per_mwh[s] * storage_capacity[s, z]
                     for s in Ss, z in Zs) -
-                sum(af_storage[s] * capex_injection[s] * injection_capacity[s, z]
+                sum(model_parameters.storage_annuity_factor[s] * model_parameters.storage_injection_investment_cost_per_mw[s] * injection_capacity[s, z]
                     for s in Ss, z in Zs) -
-                sum(af_storage[s] * capex_extraction[s] * extraction_capacity[s, z]
+                sum(model_parameters.storage_annuity_factor[s] * model_parameters.storage_extraction_investment_cost_per_mw[s] * extraction_capacity[s, z]
                     for s in Ss, z in Zs) -
-                sum(mc_gen[g] * generation[f, g, z, t]
+                sum(model_parameters.generation_marginal_cost_per_mwh[g] * generation[f, g, z, t]
                     for f in Fs, g in Gs, z in Zs, t in Ts) -
-                sum(flow_cost * flow[f, z1, z2, t]
+                sum(model_parameters.transmission_flow_cost_per_mwh *flow[f, z1, z2, t]
                     for f in Fs, z1 in Zs, z2 in Zs, t in Ts if z1 != z2)
             )
 
-            # Constraints
-            # Generation availability
-            @constraint(model, gen_avail[f in Fs, g in Gs, z in Zs, t in Ts],
-                generation[f, g, z, t] <= avail[(g, z, t)] * generation_capacity[f, g, z])
+            @constraint(model, generation_availability_constraint[f in Fs, g in Gs, z in Zs, t in Ts],
+                generation[f, g, z, t] <= generation_availability[(g, z, t)] * generation_capacity[f, g, z])
 
-            # Injection power limit: sum over firms
-            @constraint(model, inj_limit[s in Ss, z in Zs, t in Ts],
+            @constraint(model, injection_capacity_constraint[s in Ss, z in Zs, t in Ts],
                 sum(injection[f, s, z, t] for f in Fs) <= injection_capacity[s, z])
 
-            # Extraction power limit
-            @constraint(model, ext_limit[s in Ss, z in Zs, t in Ts],
+            @constraint(model, extraction_capacity_constraint[s in Ss, z in Zs, t in Ts],
                 sum(extraction[f, s, z, t] for f in Fs) <= extraction_capacity[s, z])
 
-            # Storage energy capacity limit
-            @constraint(model, stor_limit[s in Ss, z in Zs, t in Ts],
+            @constraint(model, storage_capacity_constraint[s in Ss, z in Zs, t in Ts],
                 sum(storage_level[f, s, z, t] for f in Fs) <= storage_capacity[s, z])
 
-            # Storage dynamics per firm
-            @constraint(model, stor_dyn[f in Fs, s in Ss, z in Zs, t in Ts],
-                storage_level[f, s, z, t] == storage_level[f, s, z, previous[t]] +
-                    injection[f, s, z, t] - extraction[f, s, z, t])
+            @constraint(model, storage_balance_constraint[f in Fs, s in Ss, z in Zs, t in Ts],
+                storage_level[f, s, z, t] == storage_level[f, s, z, previous[t]] + injection[f, s, z, t] - extraction[f, s, z, t])
 
-            # Market clearing
             @constraint(model, market_clearing[z in Zs, t in Ts],
                 sum(generation[f, g, z, t] for f in Fs, g in Gs) +
-                sum(extraction[f, s, z, t] * η_ext[s] for f in Fs, s in Ss) +
+                sum(extraction[f, s, z, t] * model_parameters.discharging_efficiency[s] for f in Fs, s in Ss) +
                 sum(flow[f, z2, z, t] for f in Fs, z2 in Zs if z2 != z)
                 >=
                 sum(Q[f, z, t] for f in Fs) +
-                sum(injection[f, s, z, t] / η_inj[s] for f in Fs, s in Ss) +
+                sum(injection[f, s, z, t] / model_parameters.charging_efficiency[s] for f in Fs, s in Ss) +
                 sum(flow[f, z, z2, t] for f in Fs, z2 in Zs if z2 != z)
             )
 
-            # Flow constraints
             if local_pricing
                 @constraint(model, no_flow[f in Fs, z1 in Zs, z2 in Zs, t in Ts; z1 != z2],
                     flow[f, z1, z2, t] == 0)
             else
-                @constraint(model, flow_cap[f in Fs, z1 in Zs, z2 in Zs, t in Ts; z1 != z2],
+                @constraint(model, flow_capacity_constraint[f in Fs, z1 in Zs, z2 in Zs, t in Ts; z1 != z2],
                     flow[f, z1, z2, t] <= 100_000)
             end
 
-            # No self-flow
             @constraint(model, no_self_flow[f in Fs, z in Zs, t in Ts],
-                flow[f, z, z, t] == 0)
+                flow[f, z, z, t] == 0
+            )
 
             optimize!(model)
             @assert JuMP.termination_status(model) == MOI.OPTIMAL
 
-            # Compute prices from inverse demand function
             prices_arr = JuMP.Containers.DenseAxisArray(
-                [a_param[(z, t)] + b_param[(z, t)] * sum(value(Q[f, z, t]) for f in Fs)
-                 for z in Zs, t in Ts],
+                [
+                    inverse_demand_intercept[(z, t)] +
+                    inverse_demand_slope[(z, t)] * sum(value(Q[f, z, t]) for f in Fs)
+                    for z in Zs, t in Ts
+                ],
                 Zs, collect(Ts)
             )
 
-            # Demand = sum of Q over firms
             demand_arr = JuMP.Containers.DenseAxisArray(
                 [sum(value(Q[f, z, t]) for f in Fs) for z in Zs, t in Ts],
                 Zs, collect(Ts)
@@ -838,91 +859,26 @@ end
 function get_deterministic_strategic_behavior_results(optimizer)
     @load joinpath(@__DIR__, "results", "data.jld2") data
 
-    Gs = ["Wind offshore", "Wind onshore", "Photovoltaics", "Loss of Load"]
-    Ss = ["Battery", "Hydrogen"]
-    Zs = ["50Hertz", "Amprion", "TenneT", "TransnetBW"]
-    Fs = Zs
-    Ts = 1:8760
-    previous = Dict(t => t == 1 ? 8760 : t - 1 for t in Ts)
+    Gs = generation_technologies
+    Ss = storage_technologies
+    Zs = zones
+    Fs = zones
+    Ts = time_steps
+    years = weather_years
+    previous = previous_time_step
 
-    discount_rate = 0.05
-    annuity(r, n) = r / (1 - (1 + r)^(-n))
-
-    lifetime_gen = Dict(
-        "Wind offshore" => 30,
-        "Wind onshore" => 30,
-        "Photovoltaics" => 30,
-        "Loss of Load" => 30,
-    )
-    lifetime_storage = Dict(
-        "Battery" => 15,
-        "Hydrogen" => 30,
-    )
-
-    capex_gen = Dict(
-        "Wind offshore" => 2.8e6,
-        "Wind onshore" => 1.2e6,
-        "Photovoltaics" => 0.6e6,
-        "Loss of Load" => 1.0,
-    )
-    mc_gen = Dict(
-        "Wind offshore" => 1.0,
-        "Wind onshore" => 1.0,
-        "Photovoltaics" => 1.0,
-        "Loss of Load" => 1000.0,
-    )
-
-    capex_storage_energy = Dict(
-        "Battery" => 3e5,
-        "Hydrogen" => 3e3,
-    )
-    capex_injection = Dict(
-        "Battery" => 1.0,
-        "Hydrogen" => 1.4e6,
-    )
-    capex_extraction = Dict(
-        "Battery" => 1.0,
-        "Hydrogen" => 6e5,
-    )
-    η_inj = Dict(
-        "Battery" => 0.95,
-        "Hydrogen" => 0.60,
-    )
-    η_ext = Dict(
-        "Battery" => 0.95,
-        "Hydrogen" => 0.60,
-    )
-
-    flow_cost = 1.0
-
-    af_gen = Dict(g => annuity(discount_rate, lifetime_gen[g]) for g in Gs)
-    af_storage = Dict(s => annuity(discount_rate, lifetime_storage[s]) for s in Ss)
-
-    years = 2020:2025
+    model_parameters = get_model_parameters()
+    yearly_model_inputs = prepare_yearly_model_inputs(data)
 
     deterministic_strategic_behavior_results = JuMP.Containers.DenseAxisArray(
         Array{Any}(undef, length(years), 2), collect(years), [true, false]
     )
 
     for year in years
-        year_data = filter(row -> row.Year == year, data)
-
-        avail = Dict{Tuple{String,String,Int},Float64}()
-        a_param = Dict{Tuple{String,Int},Float64}()
-        b_param = Dict{Tuple{String,Int},Float64}()
-
-        for row in eachrow(year_data)
-            z = row.Area
-            t = row.hour_of_year
-
-            for g in ["Wind offshore", "Wind onshore", "Photovoltaics"]
-                avail[(g, z, t)] = row["$(g) availability"]
-            end
-            avail[("Loss of Load", z, t)] = 1.0
-
-            a_param[(z, t)] = row.a
-            b_param[(z, t)] = row.b
-        end
+        year_information = yearly_model_inputs[year]
+        generation_availability = year_information.generation_availability
+        inverse_demand_intercept = year_information.inverse_demand_intercept
+        inverse_demand_slope = year_information.inverse_demand_slope
 
         for local_pricing in [true, false]
             model = Model(optimizer)
@@ -932,7 +888,6 @@ function get_deterministic_strategic_behavior_results(optimizer)
             @variable(model, storage_capacity[s in Ss, z in Zs] >= 0)
             @variable(model, injection_capacity[s in Ss, z in Zs] >= 0)
             @variable(model, extraction_capacity[s in Ss, z in Zs] >= 0)
-
             @variable(model, generation[f in Fs, g in Gs, z in Zs, t in Ts] >= 0)
             @variable(model, injection[f in Fs, s in Ss, z in Zs, t in Ts] >= 0)
             @variable(model, extraction[f in Fs, s in Ss, z in Zs, t in Ts] >= 0)
@@ -940,7 +895,6 @@ function get_deterministic_strategic_behavior_results(optimizer)
             @variable(model, flow[f in Fs, z1 in Zs, z2 in Zs, t in Ts] >= 0)
             @variable(model, Q[f in Fs, z in Zs, t in Ts] >= 0)
 
-            # Nur Generation in Heimat-Zone
             for f in Fs, g in Gs, z in Zs
                 if f != z
                     fix(generation_capacity[f, g, z], 0.0; force = true)
@@ -950,7 +904,6 @@ function get_deterministic_strategic_behavior_results(optimizer)
                 end
             end
 
-            # Bei local pricing nur Verkauf in eigener Zone
             if local_pricing
                 for f in Fs, z in Zs, t in Ts
                     if f != z
@@ -959,102 +912,72 @@ function get_deterministic_strategic_behavior_results(optimizer)
                 end
             end
 
-            @expression(model, Q_total[z in Zs, t in Ts], sum(Q[f, z, t] for f in Fs))
+            @expression(model, total_quantity[z in Zs, t in Ts],
+                sum(Q[f, z, t] for f in Fs)
+            )
 
             @objective(model, Max,
-                sum(
-                    a_param[(z, t)] * Q_total[z, t] +
-                    0.5 * b_param[(z, t)] * Q_total[z, t]^2
-                    for z in Zs, t in Ts
-                )
-                + sum(
-                    0.5 * b_param[(z, t)] * Q[f, z, t]^2
-                    for f in Fs, z in Zs, t in Ts
-                )
-                - sum(
-                    af_gen[g] * capex_gen[g] * generation_capacity[f, g, z]
-                    for f in Fs, g in Gs, z in Zs
-                )
-                - sum(
-                    af_storage[s] * capex_storage_energy[s] * storage_capacity[s, z]
-                    for s in Ss, z in Zs
-                )
-                - sum(
-                    af_storage[s] * capex_injection[s] * injection_capacity[s, z]
-                    for s in Ss, z in Zs
-                )
-                - sum(
-                    af_storage[s] * capex_extraction[s] * extraction_capacity[s, z]
-                    for s in Ss, z in Zs
-                )
-                - sum(
-                    mc_gen[g] * generation[f, g, z, t]
-                    for f in Fs, g in Gs, z in Zs, t in Ts
-                )
-                - sum(
-                    flow_cost * flow[f, z1, z2, t]
-                    for f in Fs, z1 in Zs, z2 in Zs, t in Ts if z1 != z2
-                )
+                sum(inverse_demand_intercept[(z, t)] * total_quantity[z, t] + 0.5 * inverse_demand_slope[(z, t)] * total_quantity[z, t]^2 for z in Zs, t in Ts) +
+                sum(0.5 * inverse_demand_slope[(z, t)] * Q[f, z, t]^2 for f in Fs, z in Zs, t in Ts)-
+                sum(model_parameters.generation_annuity_factor[g] * model_parameters.generation_investment_cost_per_mw[g] * generation_capacity[f, g, z] for f in Fs, g in Gs, z in Zs)-
+                sum(model_parameters.storage_annuity_factor[s] * model_parameters.storage_energy_investment_cost_per_mwh[s] * storage_capacity[s, z] for s in Ss, z in Zs)-
+                sum(model_parameters.storage_annuity_factor[s] * model_parameters.storage_injection_investment_cost_per_mw[s] * injection_capacity[s, z] for s in Ss, z in Zs) -
+                sum(model_parameters.storage_annuity_factor[s] * model_parameters.storage_extraction_investment_cost_per_mw[s] * extraction_capacity[s, z] for s in Ss, z in Zs) -
+                sum(model_parameters.generation_marginal_cost_per_mwh[g] *generation[f, g, z, t] for f in Fs, g in Gs, z in Zs, t in Ts)-
+                sum(model_parameters.transmission_flow_cost_per_mwh * flow[f, z1, z2, t] for f in Fs, z1 in Zs, z2 in Zs, t in Ts if z1 != z2)
             )
 
-            @constraint(model, gen_avail[f in Fs, g in Gs, z in Zs, t in Ts],
-                generation[f, g, z, t] <= avail[(g, z, t)] * generation_capacity[f, g, z]
-            )
+            @constraint(model, generation_availability_constraint[f in Fs, g in Gs, z in Zs, t in Ts],
+                generation[f, g, z, t] <= generation_availability[(g, z, t)] * generation_capacity[f, g, z])
 
-            @constraint(model, inj_limit[s in Ss, z in Zs, t in Ts],
-                sum(injection[f, s, z, t] for f in Fs) <= injection_capacity[s, z]
-            )
+            @constraint(model, injection_capacity_constraint[s in Ss, z in Zs, t in Ts],
+                sum(injection[f, s, z, t] for f in Fs) <= injection_capacity[s, z])
 
-            @constraint(model, ext_limit[s in Ss, z in Zs, t in Ts],
-                sum(extraction[f, s, z, t] for f in Fs) <= extraction_capacity[s, z]
-            )
+            @constraint(model, extraction_capacity_constraint[s in Ss, z in Zs, t in Ts],
+                sum(extraction[f, s, z, t] for f in Fs) <= extraction_capacity[s, z])
 
-            @constraint(model, stor_limit[s in Ss, z in Zs, t in Ts],
-                sum(storage_level[f, s, z, t] for f in Fs) <= storage_capacity[s, z]
-            )
+            @constraint(model, storage_capacity_constraint[s in Ss, z in Zs, t in Ts],
+                sum(storage_level[f, s, z, t] for f in Fs) <= storage_capacity[s, z])
 
-            @constraint(model, stor_dyn[f in Fs, s in Ss, z in Zs, t in Ts],
-                storage_level[f, s, z, t] ==
-                    storage_level[f, s, z, previous[t]] +
-                    injection[f, s, z, t] -
-                    extraction[f, s, z, t]
-            )
+            @constraint(model, storage_balance_constraint[f in Fs, s in Ss, z in Zs, t in Ts],
+                storage_level[f, s, z, t] == storage_level[f, s, z, previous[t]] + injection[f, s, z, t] - extraction[f, s, z, t])
 
-            @constraint(model, firm_balance[f in Fs, z in Zs, t in Ts],
+            @constraint(model, firm_balance_constraint[f in Fs, z in Zs, t in Ts],
                 sum(generation[f, g, z, t] for g in Gs) +
-                sum(extraction[f, s, z, t] * η_ext[s] for s in Ss) +
+                sum(extraction[f, s, z, t] * model_parameters.discharging_efficiency[s] for s in Ss) +
                 sum(flow[f, z2, z, t] for z2 in Zs if z2 != z)
                 ==
                 Q[f, z, t] +
-                sum(injection[f, s, z, t] / η_inj[s] for s in Ss) +
+                sum(injection[f, s, z, t] / model_parameters.charging_efficiency[s] for s in Ss) +
                 sum(flow[f, z, z2, t] for z2 in Zs if z2 != z)
             )
 
             if local_pricing
                 @constraint(model, no_flow[f in Fs, z1 in Zs, z2 in Zs, t in Ts; z1 != z2],
-                    flow[f, z1, z2, t] == 0
-                )
+                    flow[f, z1, z2, t] == 0)
             else
-                @constraint(model, flow_cap[f in Fs, z1 in Zs, z2 in Zs, t in Ts; z1 != z2],
-                    flow[f, z1, z2, t] <= 100_000
-                )
+                @constraint(model, flow_capacity_constraint[f in Fs, z1 in Zs, z2 in Zs, t in Ts; z1 != z2],
+                    flow[f, z1, z2, t] <= 100_000)
             end
 
             @constraint(model, no_self_flow[f in Fs, z in Zs, t in Ts],
-                flow[f, z, z, t] == 0
-            )
+                flow[f, z, z, t] == 0)
 
             optimize!(model)
             status = JuMP.termination_status(model)
             @assert status in (MOI.OPTIMAL, MOI.LOCALLY_SOLVED) "Strategic y=$year lp=$local_pricing: status=$status"
 
             prices_arr = JuMP.Containers.DenseAxisArray(
-                [a_param[(z, t)] + b_param[(z, t)] * value(Q_total[z, t]) for z in Zs, t in Ts],
+                [
+                    inverse_demand_intercept[(z, t)] +
+                    inverse_demand_slope[(z, t)] * value(total_quantity[z, t])
+                    for z in Zs, t in Ts
+                ],
                 Zs, collect(Ts)
             )
 
             demand_arr = JuMP.Containers.DenseAxisArray(
-                [value(Q_total[z, t]) for z in Zs, t in Ts],
+                [value(total_quantity[z, t]) for z in Zs, t in Ts],
                 Zs, collect(Ts)
             )
 
@@ -1071,7 +994,6 @@ function get_deterministic_strategic_behavior_results(optimizer)
                 "total_cost"          => objective_value(model),
                 "flow"                => value.(flow),
                 "extraction_capacity" => value.(extraction_capacity),
-                "Q"                   => value.(Q),
             )
         end
     end
@@ -1086,14 +1008,10 @@ end
 
 function create_deterministic_elastic_results_visualization()
     welfare_path = joinpath(@__DIR__, "results", "deterministic_welfare_maximization_results.jld2")
-    welfare_test = joinpath(@__DIR__, "test_data", "deterministic_welfare_maximization_results.jld2")
-    welfare_results = load(isfile(welfare_path) ? welfare_path : welfare_test,
-                          "deterministic_welfare_maximization_results")
+    welfare_results = load(welfare_path, "deterministic_welfare_maximization_results")
 
     strategic_path = joinpath(@__DIR__, "results", "deterministic_strategic_behavior_results.jld2")
-    strategic_test = joinpath(@__DIR__, "test_data", "deterministic_strategic_behavior_results.jld2")
-    strategic_results = load(isfile(strategic_path) ? strategic_path : strategic_test,
-                            "deterministic_strategic_behavior_results")
+    strategic_results = load(strategic_path, "deterministic_strategic_behavior_results")
 
     cmap = Dict(
         "Storage Injection - Battery"    => "#ae393f",
@@ -1154,6 +1072,9 @@ function create_deterministic_elastic_results_visualization()
 
     all_cap_axes = vcat(ax_gen_cap, ax_inj_cap, ax_ext_cap, ax_str_cap)
 
+    zone_legend_elements = [LineElement(color = zone_colors[iz]) for iz in 1:4]
+    Legend(fig[2, 5], zone_legend_elements, Zs, framevisible = true, labelsize = 10)
+
     sel_behavior = Observable("Perfect Competition")
     sel_lp = Observable(true)
     sel_year = Observable(2020)
@@ -1183,9 +1104,8 @@ function create_deterministic_elastic_results_visualization()
         # Prices
         for (iz, z) in enumerate(Zs)
             lines!(ax_price, collect(Ts), [prices[z, t] for t in Ts],
-                   color = zone_colors[iz], label = z)
+                   color = zone_colors[iz])
         end
-        axislegend(ax_price, position = :rt, labelsize = 10)
 
         # Dispatch per zone - aggregate over firms
         for (iz, z) in enumerate(Zs)
@@ -1226,10 +1146,11 @@ function create_deterministic_elastic_results_visualization()
             exports = [sum(fl_4d[f, z, z2, t] for f in Fs, z2 in Zs if z2 != z) for t in Ts]
             band!(ax_dispatch[iz], xs, neg_data .- exports, neg_data,
                   color = parse(Makie.Colors.Colorant, cmap["Exports"]))
+            hlines!(ax_dispatch[iz], [0], color = :black, linewidth = 0.5)
         end
 
         # Capacity bars by type
-        gen_cap = r["generation_capacity"]  # [f, g, z]
+        gen_cap = r["generation_capacity"]
         stor_cap = r["storage_capacity"]
         inj_cap_d = r["injection_capacity"]
         ext_cap_d = r["extraction_capacity"]
@@ -1274,206 +1195,157 @@ function get_stochastic_cost_minimization_results(
 )
     @load joinpath(@__DIR__, "results", "data.jld2") data
 
-    Gs = ["Wind offshore", "Wind onshore", "Photovoltaics", "Loss of Load"]
-    Ss = ["Battery", "Hydrogen"]
-    Zs = ["50Hertz", "Amprion", "TenneT", "TransnetBW"]
-    Ts = 1:8760
-    previous = Dict(t => t == 1 ? 8760 : t - 1 for t in Ts)
+    Gs = generation_technologies
+    Ss = storage_technologies
+    Zs = zones
+    Ts = time_steps
+    years = weather_years
+    previous = previous_time_step
 
-    discount_rate = 0.05
-    annuity(r, n) = r / (1 - (1 + r)^(-n))
+    model_parameters = get_model_parameters()
+    yearly_model_inputs = prepare_yearly_model_inputs(data)
 
-    lifetime_gen = Dict("Wind offshore" => 30, "Wind onshore" => 30,
-                        "Photovoltaics" => 30, "Loss of Load" => 30)
-    lifetime_storage = Dict("Battery" => 15, "Hydrogen" => 30)
-
-    capex_gen = Dict("Wind offshore" => 2.8e6, "Wind onshore" => 1.2e6,
-                     "Photovoltaics" => 0.6e6, "Loss of Load" => 1.0)
-    mc_gen = Dict("Wind offshore" => 1.0, "Wind onshore" => 1.0,
-                  "Photovoltaics" => 1.0, "Loss of Load" => 1000.0)
-
-    capex_storage_energy = Dict("Battery" => 3e5, "Hydrogen" => 3e3)
-    capex_injection = Dict("Battery" => 1.0, "Hydrogen" => 1.4e6)
-    capex_extraction = Dict("Battery" => 1.0, "Hydrogen" => 6e5)
-    η_inj = Dict("Battery" => 0.95, "Hydrogen" => 0.60)
-    η_ext = Dict("Battery" => 0.95, "Hydrogen" => 0.60)
-
-    flow_cost = 0.0
-
-    af_gen = Dict(g => annuity(discount_rate, lifetime_gen[g]) for g in Gs)
-    af_storage = Dict(s => annuity(discount_rate, lifetime_storage[s]) for s in Ss)
-
-    years = 2020:2025
-
-    # Pre-compute availability and demand for each year
-    avail_by_year = Dict{Int,Dict{Tuple{String,String,Int},Float64}}()
-    demand_by_year = Dict{Int,Dict{Tuple{String,Int},Float64}}()
+    generation_availability_by_year = Dict{Int, Dict{Tuple{String,String,Int},Float64}}()
+    demand_by_year = Dict{Int, Dict{Tuple{String,Int},Float64}}()
 
     for year in years
-        year_data = filter(row -> row.Year == year, data)
-        avail = Dict{Tuple{String,String,Int},Float64}()
-        dem = Dict{Tuple{String,Int},Float64}()
-        for row in eachrow(year_data)
-            z = row.Area
-            t = row.hour_of_year
-            for g in ["Wind offshore", "Wind onshore", "Photovoltaics"]
-                avail[(g, z, t)] = row["$(g) availability"]
-            end
-            avail[("Loss of Load", z, t)] = 1.0
-            dem[(z, t)] = row["grid load [MWh]"]
-        end
-        avail_by_year[year] = avail
-        demand_by_year[year] = dem
+        year_information = yearly_model_inputs[year]
+        generation_availability_by_year[year] = year_information.generation_availability
+        demand_by_year[year] = year_information.demand_by_zone_and_time
     end
 
-    model = SDDP.LinearPolicyGraph(
+    stochastic_model = SDDP.LinearPolicyGraph(
         stages = 2,
         lower_bound = lower_bound,
         optimizer = optimizer,
-    ) do sp, stage
-        set_silent(sp)
+    ) do subproblem, stage
+        set_silent(subproblem)
 
-        # State variables for capacities
-        @variable(sp, generation_capacity[g in Gs, z in Zs] >= 0,
-                  SDDP.State, initial_value = 0.0)
-        @variable(sp, storage_capacity[s in Ss, z in Zs] >= 0,
-                  SDDP.State, initial_value = 0.0)
-        @variable(sp, injection_capacity[s in Ss, z in Zs] >= 0,
-                  SDDP.State, initial_value = 0.0)
-        @variable(sp, extraction_capacity[s in Ss, z in Zs] >= 0,
-                  SDDP.State, initial_value = 0.0)
+        @variable(subproblem, generation_capacity[g in Gs, z in Zs] >= 0, SDDP.State,initial_value = 0.0,)
+        @variable(subproblem, storage_capacity[s in Ss, z in Zs] >= 0, SDDP.State, initial_value = 0.0,)
+        @variable(subproblem, injection_capacity[s in Ss, z in Zs] >= 0, SDDP.State, initial_value = 0.0,)
+        @variable(subproblem, extraction_capacity[s in Ss, z in Zs] >= 0, SDDP.State, initial_value = 0.0,)
 
         if stage == 1
-            # First stage: only investment decisions
-            # The .out variables represent decisions; .in is initial (0)
-            @stageobjective(sp,
-                sum(af_gen[g] * capex_gen[g] * generation_capacity[g, z].out
-                    for g in Gs, z in Zs) +
-                sum(af_storage[s] * capex_storage_energy[s] * storage_capacity[s, z].out
-                    for s in Ss, z in Zs) +
-                sum(af_storage[s] * capex_injection[s] * injection_capacity[s, z].out
-                    for s in Ss, z in Zs) +
-                sum(af_storage[s] * capex_extraction[s] * extraction_capacity[s, z].out
-                    for s in Ss, z in Zs)
+            @stageobjective(
+                subproblem,
+                sum(model_parameters.generation_annuity_factor[g] * model_parameters.generation_investment_cost_per_mw[g] * generation_capacity[g, z].out for g in Gs, z in Zs) +
+                sum(model_parameters.storage_annuity_factor[s] * model_parameters.storage_energy_investment_cost_per_mwh[s] * storage_capacity[s, z].out for s in Ss, z in Zs ) +
+                sum(model_parameters.storage_annuity_factor[s] * model_parameters.storage_injection_investment_cost_per_mw[s] * injection_capacity[s, z].out for s in Ss, z in Zs) +
+                sum(model_parameters.storage_annuity_factor[s] * model_parameters.storage_extraction_investment_cost_per_mw[s] * extraction_capacity[s, z].out for s in Ss, z in Zs)
             )
-            # Pass through: out = out (capacity decision)
-            # No additional constraints needed beyond state transition
+
         else
-            # Second stage: operational decisions
-            @variable(sp, generation[g in Gs, z in Zs, t in Ts] >= 0)
-            @variable(sp, injection[s in Ss, z in Zs, t in Ts] >= 0)
-            @variable(sp, extraction[s in Ss, z in Zs, t in Ts] >= 0)
-            @variable(sp, storage_level[s in Ss, z in Zs, t in Ts] >= 0)
-            @variable(sp, flow[z1 in Zs, z2 in Zs, t in Ts] >= 0)
-            @variable(sp, load_shedding[z in Zs, t in Ts] >= 0)  # slack for feasibility
+            @variable(subproblem, generation[g in Gs, z in Zs, t in Ts] >= 0)
+            @variable(subproblem, injection[s in Ss, z in Zs, t in Ts] >= 0)
+            @variable(subproblem, extraction[s in Ss, z in Zs, t in Ts] >= 0)
+            @variable(subproblem, storage_level[s in Ss, z in Zs, t in Ts] >= 0)
+            @variable(subproblem, flow[z1 in Zs, z2 in Zs, t in Ts] >= 0)
+            @variable(subproblem, load_shedding[z in Zs, t in Ts] >= 0)
 
-            # Capacities are fixed from stage 1 (state variables)
-            # .in = capacity from stage 1, .out = same (no further investment)
-            @constraint(sp, cap_fix_gen[g in Gs, z in Zs],
-                generation_capacity[g, z].out == generation_capacity[g, z].in)
-            @constraint(sp, cap_fix_stor[s in Ss, z in Zs],
-                storage_capacity[s, z].out == storage_capacity[s, z].in)
-            @constraint(sp, cap_fix_inj[s in Ss, z in Zs],
-                injection_capacity[s, z].out == injection_capacity[s, z].in)
-            @constraint(sp, cap_fix_ext[s in Ss, z in Zs],
-                extraction_capacity[s, z].out == extraction_capacity[s, z].in)
+            @constraint(subproblem, generation_capacity_fixed[g in Gs, z in Zs], generation_capacity[g, z].out == generation_capacity[g, z].in)
+            @constraint(subproblem, storage_capacity_fixed[s in Ss, z in Zs], storage_capacity[s, z].out == storage_capacity[s, z].in)
+            @constraint(subproblem, injection_capacity_fixed[s in Ss, z in Zs], injection_capacity[s, z].out == injection_capacity[s, z].in)
+            @constraint(subproblem, extraction_capacity_fixed[s in Ss, z in Zs], extraction_capacity[s, z].out == extraction_capacity[s, z].in)
 
-            # Placeholder constraints with RHS to be set by parameterize
-            @constraint(sp, gen_avail[g in Gs, z in Zs, t in Ts],
-                generation[g, z, t] <= 0)
-            @constraint(sp, market_clearing[z in Zs, t in Ts],
+            @constraint(subproblem, generation_availability_constraint[g in Gs, z in Zs, t in Ts], generation[g, z, t] <= 0)
+
+            @constraint(subproblem, market_clearing[z in Zs, t in Ts],
                 sum(generation[g, z, t] for g in Gs) +
-                sum(extraction[s, z, t] * η_ext[s] for s in Ss) +
+                sum(extraction[s, z, t] * model_parameters.discharging_efficiency[s] for s in Ss) +
                 sum(flow[z2, z, t] for z2 in Zs if z2 != z) +
                 load_shedding[z, t]
                 >=
-                0 +
-                sum(injection[s, z, t] / η_inj[s] for s in Ss) +
+                sum(injection[s, z, t] / model_parameters.charging_efficiency[s] for s in Ss) +
                 sum(flow[z, z2, t] for z2 in Zs if z2 != z)
             )
 
-            @constraint(sp, inj_limit[s in Ss, z in Zs, t in Ts],
-                injection[s, z, t] <= injection_capacity[s, z].in)
-            @constraint(sp, ext_limit[s in Ss, z in Zs, t in Ts],
-                extraction[s, z, t] <= extraction_capacity[s, z].in)
-            @constraint(sp, stor_limit[s in Ss, z in Zs, t in Ts],
-                storage_level[s, z, t] <= storage_capacity[s, z].in)
-            @constraint(sp, stor_dyn[s in Ss, z in Zs, t in Ts],
-                storage_level[s, z, t] == storage_level[s, z, previous[t]] +
-                    injection[s, z, t] - extraction[s, z, t])
+            @constraint(subproblem, injection_capacity_constraint[s in Ss, z in Zs, t in Ts], injection[s, z, t] <= injection_capacity[s, z].in)
+            @constraint(subproblem, extraction_capacity_constraint[s in Ss, z in Zs, t in Ts], extraction[s, z, t] <= extraction_capacity[s, z].in)
+            @constraint(subproblem, storage_capacity_constraint[s in Ss, z in Zs, t in Ts], storage_level[s, z, t] <= storage_capacity[s, z].in)
+            @constraint(subproblem, storage_balance_constraint[s in Ss, z in Zs, t in Ts], storage_level[s, z, t] == storage_level[s, z, previous[t]] + injection[s, z, t] - extraction[s, z, t])
 
             if local_pricing
-                @constraint(sp, no_flow[z1 in Zs, z2 in Zs, t in Ts; z1 != z2],
-                    flow[z1, z2, t] == 0)
+                @constraint(subproblem, no_flow[z1 in Zs, z2 in Zs, t in Ts; z1 != z2], flow[z1, z2, t] == 0)
             else
-                @constraint(sp, flow_cap[z1 in Zs, z2 in Zs, t in Ts; z1 != z2],
-                    flow[z1, z2, t] <= 100_000)
+                @constraint(subproblem, flow_capacity_constraint[z1 in Zs, z2 in Zs, t in Ts; z1 != z2], flow[z1, z2, t] <= 100_000)
             end
-            @constraint(sp, no_self_flow[z in Zs, t in Ts],
-                flow[z, z, t] == 0)
 
-            SDDP.parameterize(sp, collect(years)) do ω
-                avail = avail_by_year[ω]
-                dem = demand_by_year[ω]
+            @constraint(subproblem, no_self_flow[z in Zs, t in Ts], flow[z, z, t] == 0)
+
+            SDDP.parameterize(subproblem, collect(years)) do weather_year
+                generation_availability = generation_availability_by_year[weather_year]
+                demand_by_zone_and_time = demand_by_year[weather_year]
 
                 for g in Gs, z in Zs, t in Ts
                     JuMP.set_normalized_coefficient(
-                        gen_avail[g, z, t],
+                        generation_availability_constraint[g, z, t],
                         generation_capacity[g, z].in,
-                        -avail[(g, z, t)]
+                        -generation_availability[(g, z, t)],
                     )
                 end
+
                 for z in Zs, t in Ts
-                    JuMP.set_normalized_rhs(market_clearing[z, t], dem[(z, t)])
+                    JuMP.set_normalized_rhs(
+                        market_clearing[z, t],
+                        demand_by_zone_and_time[(z, t)],
+                    )
                 end
             end
 
-            @stageobjective(sp,
-                sum(mc_gen[g] * generation[g, z, t]
-                    for g in Gs, z in Zs, t in Ts) +
-                sum(flow_cost * flow[z1, z2, t]
-                    for z1 in Zs, z2 in Zs, t in Ts if z1 != z2) +
+            @stageobjective(
+                subproblem,
+                sum(model_parameters.generation_marginal_cost_per_mwh[g] * generation[g, z, t] for g in Gs, z in Zs, t in Ts) +
+                sum(model_parameters.transmission_flow_cost_per_mwh * flow[z1, z2, t] for z1 in Zs, z2 in Zs, t in Ts if z1 != z2) +
                 sum(1e6 * load_shedding[z, t] for z in Zs, t in Ts)
             )
         end
     end
 
-    SDDP.train(model; iteration_limit = iteration_limit)
+    SDDP.train(stochastic_model; iteration_limit = iteration_limit)
 
-    # Simulate: one simulation per weather year, deterministically
-    # Use Historical sampling to force each scenario
     stochastic_cost_minimization_results = []
 
-    for year in years
-        sims = SDDP.simulate(
-            model, 1,
-            [:generation, :injection, :extraction, :storage_level, :flow,
-             :generation_capacity, :storage_capacity, :injection_capacity, :extraction_capacity],
-            sampling_scheme = SDDP.Historical(
-                [(1, nothing), (2, year)],
-            ),
+    for weather_year in years
+        simulations = SDDP.simulate(
+            stochastic_model,
+            1,
+            [
+                :generation,
+                :injection,
+                :extraction,
+                :storage_level,
+                :flow,
+                :generation_capacity,
+                :storage_capacity,
+                :injection_capacity,
+                :extraction_capacity,
+            ],
+            sampling_scheme = SDDP.Historical([(1, nothing), (2, weather_year)]),
             skip_undefined_variables = true,
         )
 
-        sim = sims[1]
-        stage2 = sim[2]
+        simulation = simulations[1]
+        second_stage_result = simulation[2]
 
-        # Build demand and prices arrays
-        dem = demand_by_year[year]
-        demand_arr = JuMP.Containers.DenseAxisArray(
-            [dem[(z, t)] for z in Zs, t in Ts],
-            Zs, collect(Ts)
+        demand_by_zone_and_time = demand_by_year[weather_year]
+
+        demand_array = JuMP.Containers.DenseAxisArray(
+            [demand_by_zone_and_time[(z, t)] for z in Zs, t in Ts],
+            Zs,
+            collect(Ts),
         )
 
-        prices_arr = JuMP.Containers.DenseAxisArray(
+        prices_array = JuMP.Containers.DenseAxisArray(
             zeros(length(Zs), length(Ts)),
-            Zs, collect(Ts)
+            Zs,
+            collect(Ts),
         )
 
-        stage2[:demand] = demand_arr
-        stage2[:prices] = prices_arr
+        second_stage_result[:demand] = demand_array
+        second_stage_result[:prices] = prices_array
 
-        push!(stochastic_cost_minimization_results, (2, stage2))
+        push!(stochastic_cost_minimization_results, (2, second_stage_result))
     end
 
     @save joinpath(@__DIR__, "results", "stochastic_cost_minimization_results.jld2") stochastic_cost_minimization_results
@@ -1484,13 +1356,11 @@ end
 # PT.2.8 – Stochastic Visualization
 # ---------------------------------
 
-function create_stochastic_cost_minimization_results_visualization()
+function create_stochastic_cost_minimization_results_visualization(local_pricing::Bool = true)
     results_path = joinpath(@__DIR__, "results", "stochastic_cost_minimization_results.jld2")
-    test_path = joinpath(@__DIR__, "test_data", "stochastic_cost_minimization_results.jld2")
-    path = isfile(results_path) ? results_path : test_path
-    stochastic_results = load(path, "stochastic_cost_minimization_results")
+    stochastic_results = load(results_path, "stochastic_cost_minimization_results")
 
-    cmap = Dict(
+    color_map = Dict(
         "Storage Injection - Battery"    => "#ae393f",
         "Storage Injection - Hydrogen"   => "#0d47a1",
         "Storage Extraction - Battery"   => "#ae393f",
@@ -1503,134 +1373,199 @@ function create_stochastic_cost_minimization_results_visualization()
         "Generation - Photovoltaics"     => "#ffeb3b",
     )
 
+    plot_colors = Dict(k => parse(Makie.Colors.Colorant, v) for (k, v) in color_map)
     zone_colors = [colorant"#1565c0", colorant"#f9a825", colorant"#2e7d32", colorant"#8e24aa"]
 
-    Gs = ["Wind offshore", "Wind onshore", "Photovoltaics", "Loss of Load"]
-    Ss = ["Battery", "Hydrogen"]
-    Zs = ["50Hertz", "Amprion", "TenneT", "TransnetBW"]
-    Ts = 1:8760
+    generation_technologies_local = generation_technologies
+    storage_technologies_local = storage_technologies
+    zones_local = zones
+    time_steps_local = time_steps
+    x_values = collect(time_steps_local)
 
-    # Map noise_term (year) to result index
-    year_to_idx = Dict{Int,Int}()
+    year_to_index = Dict{Int,Int}()
     for (idx, item) in enumerate(stochastic_results)
-        year_to_idx[item[2][:noise_term]] = idx
+        year_to_index[item[2][:noise_term]] = idx
     end
-    available_years = sort(collect(keys(year_to_idx)))
+    available_years = sort(collect(keys(year_to_index)))
 
     fig = Figure(size = (1600, 1200))
-    dd_year = Menu(fig[1, 1], options = available_years)
+
+    pricing_label = local_pricing ? "Local Pricing" : "Network Pricing"
+    Label(fig[1, 1], "Stochastic Cost Minimization ($pricing_label)", fontsize = 14, halign = :left)
+    dd_year = Menu(fig[1, 2], options = available_years)
 
     ax_price = Axis(fig[2, 1:4], title = "Prices", ylabel = "Price [€/MWh]", xlabel = "Hour of Year")
-    ax_dispatch = [Axis(fig[2+i, 1:4], title = "Dispatch $(Zs[i])", ylabel = "Generation [MW]",
-                        xlabel = "Hour of Year") for i in 1:4]
+    ax_dispatch = [
+        Axis(
+            fig[2 + i, 1:4],
+            title = "Dispatch $(zones_local[i])",
+            ylabel = "Generation [MW]",
+            xlabel = "Hour of Year",
+        )
+        for i in 1:4
+    ]
 
-    # Shared dispatch legend on the right
-    legend_order = ["Exports", "Storage Injection - Battery", "Storage Injection - Hydrogen",
-                    "Imports", "Storage Extraction - Battery", "Storage Extraction - Hydrogen",
-                    "Generation - Wind offshore", "Generation - Wind onshore",
-                    "Generation - Photovoltaics", "Generation - Loss of Load"]
-    legend_elements = [PolyElement(color = parse(Makie.Colors.Colorant, cmap[k])) for k in legend_order]
+    legend_order = [
+        "Exports",
+        "Storage Injection - Battery",
+        "Storage Injection - Hydrogen",
+        "Imports",
+        "Storage Extraction - Battery",
+        "Storage Extraction - Hydrogen",
+        "Generation - Wind offshore",
+        "Generation - Wind onshore",
+        "Generation - Photovoltaics",
+        "Generation - Loss of Load",
+    ]
+    legend_elements = [PolyElement(color = plot_colors[k]) for k in legend_order]
     Legend(fig[3:6, 5], legend_elements, legend_order, framevisible = true, labelsize = 10)
 
-    # Capacity bar charts: 4 rows × 4 zones
-    ax_gen_cap = [Axis(fig[7, i], title = "$(Zs[i]) Capacities") for i in 1:4]
-    ax_inj_cap = [Axis(fig[8, i]) for i in 1:4]
-    ax_ext_cap = [Axis(fig[9, i]) for i in 1:4]
-    ax_str_cap = [Axis(fig[10, i]) for i in 1:4]
-    ax_gen_cap[1].ylabel = "Gen [MW]"
-    ax_inj_cap[1].ylabel = "Inj [MW]"
-    ax_ext_cap[1].ylabel = "Ext [MW]"
-    ax_str_cap[1].ylabel = "Str [MWh]"
-    for r in 7:10; rowsize!(fig.layout, r, Fixed(100)); end
+    ax_generation_capacity = [Axis(fig[7, i], title = "$(zones_local[i]) Capacities") for i in 1:4]
+    ax_injection_capacity = [Axis(fig[8, i]) for i in 1:4]
+    ax_extraction_capacity = [Axis(fig[9, i]) for i in 1:4]
+    ax_storage_capacity = [Axis(fig[10, i]) for i in 1:4]
 
-    all_cap_axes = vcat(ax_gen_cap, ax_inj_cap, ax_ext_cap, ax_str_cap)
+    ax_generation_capacity[1].ylabel = "Gen [MW]"
+    ax_injection_capacity[1].ylabel = "Inj [MW]"
+    ax_extraction_capacity[1].ylabel = "Ext [MW]"
+    ax_storage_capacity[1].ylabel = "Str [MWh]"
 
-    function update_plot(year)
-        idx = year_to_idx[year]
-        r = stochastic_results[idx][2]
-        prices = r[:prices]
-        gen = r[:generation]
-        inj = r[:injection]
-        ext = r[:extraction]
-        fl = r[:flow]
+    for row in 7:10
+        rowsize!(fig.layout, row, Fixed(100))
+    end
 
-        for ax in [ax_price; ax_dispatch; all_cap_axes]
+    all_capacity_axes = vcat(
+        ax_generation_capacity,
+        ax_injection_capacity,
+        ax_extraction_capacity,
+        ax_storage_capacity,
+    )
+
+    zone_legend_elements = [LineElement(color = zone_colors[iz]) for iz in 1:4]
+    Legend(fig[2, 5], zone_legend_elements, zones_local, framevisible = true, labelsize = 10)
+
+    function update_plot(weather_year)
+        idx = year_to_index[weather_year]
+        result = stochastic_results[idx][2]
+
+        prices = result[:prices]
+        generation = result[:generation]
+        injection = result[:injection]
+        extraction = result[:extraction]
+        flow = result[:flow]
+
+        for ax in [ax_price; ax_dispatch; all_capacity_axes]
             empty!(ax)
         end
 
-        for (iz, z) in enumerate(Zs)
-            lines!(ax_price, collect(Ts), [prices[z, t] for t in Ts],
-                   color = zone_colors[iz], label = z)
-        end
-        axislegend(ax_price, position = :rt, labelsize = 10)
-
-        for (iz, z) in enumerate(Zs)
-            xs = collect(Ts)
-            pos_keys = String[]
-            pos_vals = Vector{Float64}[]
-            for g in Gs
-                push!(pos_keys, "Generation - $g")
-                push!(pos_vals, [gen[g, z, t] for t in Ts])
-            end
-            for s in Ss
-                η = s == "Battery" ? 0.95 : 0.60
-                push!(pos_keys, "Storage Extraction - $s")
-                push!(pos_vals, [ext[s, z, t] * η for t in Ts])
-            end
-            push!(pos_keys, "Imports")
-            push!(pos_vals, [sum(fl[z2, z, t] for z2 in Zs if z2 != z) for t in Ts])
-
-            pos_matrix = hcat(pos_vals...)
-            colors_pos = [parse(Makie.Colors.Colorant, cmap[k]) for k in pos_keys]
-            cumsum_pos = cumsum(pos_matrix, dims = 2)
-
-            for j in size(cumsum_pos, 2):-1:1
-                upper = cumsum_pos[:, j]
-                lower = j > 1 ? cumsum_pos[:, j-1] : zeros(length(Ts))
-                band!(ax_dispatch[iz], xs, lower, upper, color = colors_pos[j])
-            end
-
-            neg_data = zeros(length(Ts))
-            for s in Ss
-                η = s == "Battery" ? 0.95 : 0.60
-                vals = [inj[s, z, t] / η for t in Ts]
-                band!(ax_dispatch[iz], xs, neg_data .- vals, neg_data,
-                      color = parse(Makie.Colors.Colorant, cmap["Storage Injection - $s"]))
-                neg_data .-= vals
-            end
-            exports = [sum(fl[z, z2, t] for z2 in Zs if z2 != z) for t in Ts]
-            band!(ax_dispatch[iz], xs, neg_data .- exports, neg_data,
-                  color = parse(Makie.Colors.Colorant, cmap["Exports"]))
+        for (zone_index, zone) in enumerate(zones_local)
+            lines!(
+                ax_price,
+                x_values,
+                [prices[zone, t] for t in time_steps_local],
+                color = zone_colors[zone_index],
+            )
         end
 
-        # Capacity bars by type
-        gen_cap = r[:generation_capacity]
-        stor_cap = r[:storage_capacity]
-        inj_cap_d = r[:injection_capacity]
-        ext_cap_d = r[:extraction_capacity]
+        for (zone_index, zone) in enumerate(zones_local)
+            positive_keys = String[]
+            positive_values = Vector{Float64}[]
 
-        gen_cols = [parse(Makie.Colors.Colorant, cmap["Generation - $g"]) for g in Gs]
-        stor_inj_cols = [parse(Makie.Colors.Colorant, cmap["Storage Injection - $s"]) for s in Ss]
-        stor_ext_cols = [parse(Makie.Colors.Colorant, cmap["Storage Extraction - $s"]) for s in Ss]
+            for technology in generation_technologies_local
+                push!(positive_keys, "Generation - $technology")
+                push!(positive_values, [generation[technology, zone, t] for t in time_steps_local])
+            end
 
-        for (iz, z) in enumerate(Zs)
-            barplot!(ax_gen_cap[iz], 1:4, [gen_cap[g, z].out for g in Gs], color = gen_cols)
-            ax_gen_cap[iz].xticks = (1:4, ["W.off", "W.on", "PV", "LoL"])
-            ax_gen_cap[iz].xticklabelrotation = π/4
+            for storage_technology in storage_technologies_local
+                efficiency = storage_technology == "Battery" ? 0.95 : 0.60
+                push!(positive_keys, "Storage Extraction - $storage_technology")
+                push!(
+                    positive_values,
+                    [extraction[storage_technology, zone, t] * efficiency for t in time_steps_local],
+                )
+            end
 
-            barplot!(ax_inj_cap[iz], 1:2, [inj_cap_d[s, z].out for s in Ss], color = stor_inj_cols)
-            ax_inj_cap[iz].xticks = (1:2, ["Bat", "H₂"])
+            push!(positive_keys, "Imports")
+            push!(
+                positive_values,
+                [sum(flow[z2, zone, t] for z2 in zones_local if z2 != zone) for t in time_steps_local],
+            )
 
-            barplot!(ax_ext_cap[iz], 1:2, [ext_cap_d[s, z].out for s in Ss], color = stor_ext_cols)
-            ax_ext_cap[iz].xticks = (1:2, ["Bat", "H₂"])
+            positive_matrix = hcat(positive_values...)
+            positive_colors = [plot_colors[k] for k in positive_keys]
+            cumulative_positive = cumsum(positive_matrix, dims = 2)
 
-            barplot!(ax_str_cap[iz], 1:2, [stor_cap[s, z].out for s in Ss], color = stor_ext_cols)
-            ax_str_cap[iz].xticks = (1:2, ["Bat", "H₂"])
+            for j in size(cumulative_positive, 2):-1:1
+                upper = cumulative_positive[:, j]
+                lower = j > 1 ? cumulative_positive[:, j - 1] : zeros(length(time_steps_local))
+                band!(ax_dispatch[zone_index], x_values, lower, upper, color = positive_colors[j])
+            end
+
+            negative_data = zeros(length(time_steps_local))
+            for storage_technology in storage_technologies_local
+                efficiency = storage_technology == "Battery" ? 0.95 : 0.60
+                values = [injection[storage_technology, zone, t] / efficiency for t in time_steps_local]
+                band!(
+                    ax_dispatch[zone_index],
+                    x_values,
+                    negative_data .- values,
+                    negative_data,
+                    color = plot_colors["Storage Injection - $storage_technology"],
+                )
+                negative_data .-= values
+            end
+
+            exports = [sum(flow[zone, z2, t] for z2 in zones_local if z2 != zone) for t in time_steps_local]
+            band!(
+                ax_dispatch[zone_index],
+                x_values,
+                negative_data .- exports,
+                negative_data,
+                color = plot_colors["Exports"],
+            )
+            hlines!(ax_dispatch[zone_index], [0], color = :black, linewidth = 0.5)
+        end
+
+        generation_capacity = result[:generation_capacity]
+        storage_capacity = result[:storage_capacity]
+        injection_capacity = result[:injection_capacity]
+        extraction_capacity = result[:extraction_capacity]
+
+        generation_colors = [plot_colors["Generation - $g"] for g in generation_technologies_local]
+        injection_colors = [plot_colors["Storage Injection - $s"] for s in storage_technologies_local]
+        extraction_colors = [plot_colors["Storage Extraction - $s"] for s in storage_technologies_local]
+
+        for (zone_index, zone) in enumerate(zones_local)
+            generation_values = [generation_capacity[g, zone].out for g in generation_technologies_local]
+            barplot!(ax_generation_capacity[zone_index], 1:4, generation_values, color = generation_colors)
+            ax_generation_capacity[zone_index].xticks = (1:4, ["W.off", "W.on", "PV", "LoL"])
+            ax_generation_capacity[zone_index].xticklabelrotation = π / 4
+
+            injection_values = [injection_capacity[s, zone].out for s in storage_technologies_local]
+            barplot!(ax_injection_capacity[zone_index], 1:2, injection_values, color = injection_colors)
+            ax_injection_capacity[zone_index].xticks = (1:2, ["Bat", "H₂"])
+            if maximum(injection_values) == 0
+                ylims!(ax_injection_capacity[zone_index], 0, 1)
+            end
+
+            extraction_values = [extraction_capacity[s, zone].out for s in storage_technologies_local]
+            barplot!(ax_extraction_capacity[zone_index], 1:2, extraction_values, color = extraction_colors)
+            ax_extraction_capacity[zone_index].xticks = (1:2, ["Bat", "H₂"])
+            if maximum(extraction_values) == 0
+                ylims!(ax_extraction_capacity[zone_index], 0, 1)
+            end
+
+            storage_values = [storage_capacity[s, zone].out for s in storage_technologies_local]
+            barplot!(ax_storage_capacity[zone_index], 1:2, storage_values, color = extraction_colors)
+            ax_storage_capacity[zone_index].xticks = (1:2, ["Bat", "H₂"])
+            if maximum(storage_values) == 0
+                ylims!(ax_storage_capacity[zone_index], 0, 1)
+            end
         end
     end
 
-    on(dd_year.selection) do year
-        update_plot(year)
+    on(dd_year.selection) do weather_year
+        update_plot(weather_year)
     end
 
     update_plot(available_years[1])
