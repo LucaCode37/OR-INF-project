@@ -1,4 +1,7 @@
-# 123456, 098765 (mat no of group members)
+# Group members:
+# 496363 - Luca Noack
+# 497833 - Irina Makarova
+# This project solution was implemented together by both group members.
 
 include(joinpath(@__DIR__, "src.jl"))
 
